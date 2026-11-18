@@ -1,4 +1,4 @@
-"""Entry point:  python -m dhan_autotrader [--check] [--confirm-live]"""
+"""Entry point:  python -m dhan_autotrader [--strategy equity|nifty-options] [--check] [--confirm-live]"""
 from __future__ import annotations
 
 import argparse
@@ -9,11 +9,14 @@ import sys
 from .broker import BrokerError, DhanBroker, PaperBroker
 from .bot import TradingBot
 from .config import Config
+from .options import NiftyOptionsBot, OptionSettings
 from .strategy import EmaCrossover
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="dhan_autotrader", description="Dhan auto-trading bot")
+    p.add_argument("--strategy", choices=["equity", "nifty-options"], default=os.environ.get("STRATEGY", "equity"),
+                   help="equity = EMA crossover on stocks; nifty-options = buy NIFTY CE/PE on index crossover")
     p.add_argument("--check", action="store_true", help="only verify the Dhan connection and exit")
     p.add_argument("--confirm-live", action="store_true", help="required to place REAL orders when TRADING_MODE=live")
     p.add_argument("-v", "--verbose", action="store_true")
@@ -29,6 +32,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         cfg = Config.from_env()
+        opt = OptionSettings.from_env() if args.strategy == "nifty-options" else None
     except ValueError as exc:
         log.error("Config error: %s", exc)
         return 2
@@ -46,7 +50,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         return 0
 
-    TradingBot(cfg, broker, EmaCrossover(cfg.fast_ema, cfg.slow_ema)).run()
+    strategy = EmaCrossover(cfg.fast_ema, cfg.slow_ema)
+    if opt:
+        NiftyOptionsBot(cfg, opt, broker, strategy).run()
+    else:
+        TradingBot(cfg, broker, strategy).run()
     return 0
 
 

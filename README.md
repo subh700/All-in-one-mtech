@@ -48,6 +48,39 @@ To run it every trading day, schedule it on your VPS, for example with cron at 0
 20 9 * * 1-5 cd /path/to/All-in-one-mtech && .venv/bin/python -m dhan_autotrader --confirm-live >> logs/cron.log 2>&1
 ```
 
+## NIFTY options strategy
+
+```bash
+python -m dhan_autotrader --strategy nifty-options          # paper
+python -m dhan_autotrader --strategy nifty-options --confirm-live   # live (TRADING_MODE=live)
+```
+(or set `STRATEGY=nifty-options` in `.env`)
+
+**How it works:** it **buys options only**, so the most you can lose on a trade is the premium you paid.
+
+1. It watches the **NIFTY 50 index** (`IDX_I`, security id 13) on closed candles with the same EMA crossover.
+2. On a **bullish cross** it buys a **CALL (CE)**. On a **bearish cross** it buys a **PUT (PE)**.
+3. **Strike:** ATM, which is the spot price rounded to the nearest 50. `OPT_STRIKE_OFFSET=1` picks one strike out of the money instead. Contracts priced below `OPT_MIN_PREMIUM` are skipped.
+4. **Expiry:** the nearest weekly expiry, taken from Dhan's option chain. **On expiry day it uses the next expiry** to avoid fast premium decay (`OPT_SKIP_EXPIRY_DAY`).
+5. **Size:** lots = `CAPITAL_PER_TRADE ÷ (premium × OPT_LOT_SIZE)`, capped at `OPT_MAX_LOTS`.
+6. **Exits:** the premium falls by `OPT_SL_PCT` (default 25%) or rises by `OPT_TARGET_PCT` (default 50%), an opposite crossover appears (it exits and switches to the other side), the daily loss limit is hit, or it's 15:15.
+
+Only one option position is open at a time. Orders are `NSE_FNO` / `INTRADAY` / `MARKET`.
+
+> ⚠️ **Check `OPT_LOT_SIZE`** against NSE's current NIFTY lot size before you trade live, because NSE revises it from time to time. F&O trading must also be activated on your Dhan account.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OPT_UNDERLYING` | `NIFTY:13:IDX_I` | underlying index |
+| `OPT_LOT_SIZE` | 65 | contract lot size |
+| `OPT_MAX_LOTS` | 1 | most lots per trade |
+| `OPT_STRIKE_STEP` | 50 | gap between strikes |
+| `OPT_STRIKE_OFFSET` | 0 | 0 = ATM, +n = n strikes OTM, −n = ITM |
+| `OPT_EXPIRY_INDEX` | 0 | 0 = nearest expiry, 1 = the next one |
+| `OPT_SKIP_EXPIRY_DAY` | true | on expiry day, use the next expiry |
+| `OPT_SL_PCT` / `OPT_TARGET_PCT` | 25 / 50 | % of premium |
+| `OPT_MIN_PREMIUM` | 10 | skip contracts priced below this |
+
 ## Configuration (`.env`)
 
 | Variable | Default | Meaning |
@@ -72,7 +105,8 @@ dhan_autotrader/
   broker.py    DhanBroker (live orders) and PaperBroker (simulated fills)
   strategy.py  EMA crossover (add your own Strategy subclass)
   risk.py      positions, sizing, SL/target, daily limits
-  bot.py       trading loop
+  bot.py       equity trading loop
+  options.py   NIFTY options strategy (option chain, strike/expiry selection, CE/PE bot)
 tests/         unit tests using a fake Dhan client (pytest)
 ```
 

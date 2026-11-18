@@ -45,6 +45,9 @@ def _unwrap(resp: dict, what: str):
 class DhanBroker:
     """Thin wrapper around the official `dhanhq` SDK."""
 
+    LTP_MIN_INTERVAL = 1.05  # Dhan market-quote APIs allow ~1 request/second
+    _last_ltp = 0.0
+
     def __init__(self, cfg: Config, client=None):
         self.cfg = cfg
         if client is None:
@@ -83,6 +86,10 @@ class DhanBroker:
         return [c for c in candles if c.ts <= cutoff]
 
     def ltp(self, inst: Instrument) -> float:
+        wait = self.LTP_MIN_INTERVAL - (_time.monotonic() - self._last_ltp)
+        if wait > 0:
+            _time.sleep(wait)
+        self._last_ltp = _time.monotonic()
         resp = self.api.ticker_data({inst.exchange_segment: [int(inst.security_id)]})
         data = _unwrap(resp, f"LTP {inst.symbol}")
         try:
