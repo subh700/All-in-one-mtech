@@ -46,6 +46,7 @@ class FakeOptDhan(FakeDhan):
 
 
 def make_bot(fake, clock, live=True, **opt):
+    opt.setdefault("strike_offset", 0)
     cfg = make_cfg(capital_per_trade=20000, max_daily_loss=5000, mode="live" if live else "paper")
     s = OptionSettings(**opt)
     s.validate()
@@ -57,7 +58,7 @@ def make_bot(fake, clock, live=True, **opt):
 
 def test_strike_selection_atm_otm_and_expiry_roll():
     fake = FakeOptDhan()
-    bot = make_bot(fake, Clock())
+    bot = make_bot(fake, Clock(), strike_offset=0)
     today = date(2026, 11, 18)  # an expiry day -> rolls to next
     c = bot.chain.select("CE", today)
     assert c.strike == 25100 and c.kind == "CE" and c.inst.security_id == "125100"
@@ -75,7 +76,7 @@ def test_strike_selection_atm_otm_and_expiry_roll():
 def test_illiquid_strike_skipped():
     fake = FakeOptDhan()
     fake.oc["25100.000000"]["ce"]["last_price"] = 2.0
-    c = make_bot(fake, Clock()).chain.select("CE", date(2026, 11, 19))
+    c = make_bot(fake, Clock(), strike_offset=0).chain.select("CE", date(2026, 11, 19))
     assert c.strike in (25050, 25150)
 
 
@@ -156,3 +157,32 @@ def test_paper_mode_places_no_real_orders():
     bot.tick()
     assert bot.position and bot.position.pos.entry == 120.0
     assert fake.orders == []
+
+
+def test_otm_is_default_and_never_falls_back_to_itm():
+    assert OptionSettings().strike_offset == 1
+    fake = FakeOptDhan()                       # spot 25112
+    bot = make_bot(fake, Clock(), strike_offset=1)
+    today = date(2026, 11, 19)
+    assert bot.chain.select("CE", today).strike == 25150   # above spot
+    assert bot.chain.select("PE", today).strike == 25050   # below spot
+
+    # 25150 CE illiquid -> must move further OTM (25200), not ITM (25100)
+    fake.oc["25150.000000"]["ce"]["last_price"] = 1.0
+    assert bot.chain.select("CE", today).strike == 25200
+    # 25050 PE illiquid -> 25000, never 25100
+    fake.oc["25050.000000"]["pe"]["last_price"] = 1.0
+    assert bot.chain.select("PE", today).strike == 25000
+
+
+def test_otm_trade_end_to_end():
+    fake, clock = FakeOptDhan(), Clock()
+    fake.closes = BULL
+    bot = make_bot(fake, clock, strike_offset=2)
+    bot.tick()
+    assert bot.position.contract.kind == "CE" and bot.position.contract.strike == 25200
+
+    fake.closes = BULL + [24700]                 # next bar: bearish cross
+    bot.tick()
+    assert bot.position.contract.kind == "PE" and bot.position.contract.strike == 25000  # 2 strikes below 25100
+    assert [o["transaction_type"] for o in fake.orders] == ["BUY", "SELL", "BUY"]

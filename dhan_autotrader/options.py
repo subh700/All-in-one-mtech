@@ -30,7 +30,7 @@ class OptionSettings:
     lot_size: int = 65            # verify current NSE lot size before going live
     max_lots: int = 1
     strike_step: int = 50
-    strike_offset: int = 0        # 0 = ATM, 1 = one strike OTM, -1 = one strike ITM
+    strike_offset: int = 1        # 1 = one strike OTM (default), 2 = two OTM, 0 = ATM, -1 = ITM
     expiry_index: int = 0         # 0 = nearest weekly expiry
     skip_expiry_day: bool = True  # on expiry day roll to the next expiry
     sl_pct: float = 25.0          # % of premium
@@ -45,7 +45,7 @@ class OptionSettings:
             lot_size=int(e("OPT_LOT_SIZE", "65")),
             max_lots=int(e("OPT_MAX_LOTS", "1")),
             strike_step=int(e("OPT_STRIKE_STEP", "50")),
-            strike_offset=int(e("OPT_STRIKE_OFFSET", "0")),
+            strike_offset=int(e("OPT_STRIKE_OFFSET", "1")),
             expiry_index=int(e("OPT_EXPIRY_INDEX", "0")),
             skip_expiry_day=_bool(e("OPT_SKIP_EXPIRY_DAY", "true")),
             sl_pct=float(e("OPT_SL_PCT", "25")),
@@ -122,6 +122,8 @@ class OptionChainClient:
         offset = self.s.strike_offset * step
         wanted = atm + offset if kind == "CE" else atm - offset
         strikes = sorted(oc, key=lambda k: abs(float(k) - wanted))
+        if self.s.strike_offset > 0:  # OTM mode: never fall back to an ATM/ITM strike
+            strikes = [k for k in strikes if (float(k) > spot if kind == "CE" else float(k) < spot)]
         side = kind.lower()
         for key in strikes[:5]:
             leg = oc[key].get(side) or {}

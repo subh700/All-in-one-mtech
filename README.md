@@ -56,11 +56,18 @@ python -m dhan_autotrader --strategy nifty-options --confirm-live   # live (TRAD
 ```
 (or set `STRATEGY=nifty-options` in `.env`)
 
-**How it works:** it **buys options only**, so the most you can lose on a trade is the premium you paid.
+**How it works:** it **buys OTM calls and puts only**, so the most you can lose on a trade is the premium you paid.
+
+> OTM options are cheaper (you get more lots for the same capital) but lose value faster and need a bigger NIFTY move to profit. 1–2 strikes OTM is a common balance; far-OTM options often expire worthless.
 
 1. It watches the **NIFTY 50 index** (`IDX_I`, security id 13) on closed candles with the same EMA crossover.
-2. On a **bullish cross** it buys a **CALL (CE)**. On a **bearish cross** it buys a **PUT (PE)**.
-3. **Strike:** ATM, which is the spot price rounded to the nearest 50. `OPT_STRIKE_OFFSET=1` picks one strike out of the money instead. Contracts priced below `OPT_MIN_PREMIUM` are skipped.
+2. On a **bullish cross** it buys an **OTM CALL (CE)**. On a **bearish cross** it buys an **OTM PUT (PE)**.
+3. **Strike: OTM by default** (`OPT_STRIKE_OFFSET=1`). The ATM strike is the spot rounded to the nearest 50, then:
+   - **CE** = ATM + offset × 50, which is *above* spot
+   - **PE** = ATM − offset × 50, which is *below* spot
+
+   For example, with NIFTY at 25,112, offset 1 buys the **25150 CE** or the **25050 PE**, and offset 2 buys the 25200 CE or the 25000 PE.
+   If the chosen strike is illiquid (premium < `OPT_MIN_PREMIUM`), the bot moves further OTM. It **never falls back to an ATM or ITM strike**. Set `OPT_STRIKE_OFFSET=0` for ATM.
 4. **Expiry:** the nearest weekly expiry, taken from Dhan's option chain. **On expiry day it uses the next expiry** to avoid fast premium decay (`OPT_SKIP_EXPIRY_DAY`).
 5. **Size:** lots = `CAPITAL_PER_TRADE ÷ (premium × OPT_LOT_SIZE)`, capped at `OPT_MAX_LOTS`.
 6. **Exits:** the premium falls by `OPT_SL_PCT` (default 25%) or rises by `OPT_TARGET_PCT` (default 50%), an opposite crossover appears (it exits and switches to the other side), the daily loss limit is hit, or it's 15:15.
@@ -75,7 +82,7 @@ Only one option position is open at a time. Orders are `NSE_FNO` / `INTRADAY` / 
 | `OPT_LOT_SIZE` | 65 | contract lot size |
 | `OPT_MAX_LOTS` | 1 | most lots per trade |
 | `OPT_STRIKE_STEP` | 50 | gap between strikes |
-| `OPT_STRIKE_OFFSET` | 0 | 0 = ATM, +n = n strikes OTM, −n = ITM |
+| `OPT_STRIKE_OFFSET` | 1 | n strikes OTM (1 = 50 pts, 2 = 100 pts); 0 = ATM; −n = ITM |
 | `OPT_EXPIRY_INDEX` | 0 | 0 = nearest expiry, 1 = the next one |
 | `OPT_SKIP_EXPIRY_DAY` | true | on expiry day, use the next expiry |
 | `OPT_SL_PCT` / `OPT_TARGET_PCT` | 25 / 50 | % of premium |
