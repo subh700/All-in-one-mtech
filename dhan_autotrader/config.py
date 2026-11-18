@@ -52,9 +52,16 @@ class Config:
     mode: str = "paper"
     instruments: list[Instrument] = field(default_factory=list)
 
+    signal: str = "ema"
     candle_interval: int = 5
     fast_ema: int = 9
     slow_ema: int = 21
+    st_period: int = 10
+    st_mult: float = 3.0
+    rsi_period: int = 14
+    rsi_buy: float = 60.0
+    rsi_sell: float = 40.0
+    orb_minutes: int = 15
     allow_short: bool = False
 
     capital_per_trade: float = 10000.0
@@ -63,6 +70,11 @@ class Config:
     max_trades_per_day: int = 6
     max_daily_loss: float = 1000.0
     max_open_positions: int = 2
+    trail_trigger_pct: float = 0.0   # 0 = trailing off (equity)
+    trail_pct: float = 0.0
+
+    telegram_token: str = ""
+    telegram_chat_id: str = ""
 
     entry_start: time = time(9, 30)
     entry_end: time = time(14, 45)
@@ -81,7 +93,14 @@ class Config:
             access_token=e("DHAN_ACCESS_TOKEN", ""),
             mode=e("TRADING_MODE", "paper").strip().lower(),
             instruments=parse_instruments(e("INSTRUMENTS", "HDFCBANK:1333:NSE_EQ")),
+            signal=e("SIGNAL", "ema").strip().lower(),
             candle_interval=int(e("CANDLE_INTERVAL_MIN", "5")),
+            st_period=int(e("ST_PERIOD", "10")),
+            st_mult=float(e("ST_MULT", "3")),
+            rsi_period=int(e("RSI_PERIOD", "14")),
+            rsi_buy=float(e("RSI_BUY", "60")),
+            rsi_sell=float(e("RSI_SELL", "40")),
+            orb_minutes=int(e("ORB_MINUTES", "15")),
             fast_ema=int(e("FAST_EMA", "9")),
             slow_ema=int(e("SLOW_EMA", "21")),
             allow_short=_bool(e("ALLOW_SHORT", "false")),
@@ -91,6 +110,10 @@ class Config:
             max_trades_per_day=int(e("MAX_TRADES_PER_DAY", "6")),
             max_daily_loss=float(e("MAX_DAILY_LOSS", "1000")),
             max_open_positions=int(e("MAX_OPEN_POSITIONS", "2")),
+            trail_trigger_pct=float(e("TRAIL_TRIGGER_PCT", "0")),
+            trail_pct=float(e("TRAIL_PCT", "0")),
+            telegram_token=e("TELEGRAM_BOT_TOKEN", "").strip(),
+            telegram_chat_id=e("TELEGRAM_CHAT_ID", "").strip(),
             entry_start=_parse_time(e("ENTRY_START", "09:30")),
             entry_end=_parse_time(e("ENTRY_END", "14:45")),
             square_off=_parse_time(e("SQUARE_OFF", "15:15")),
@@ -104,6 +127,16 @@ class Config:
             raise ValueError("TRADING_MODE must be 'paper' or 'live'")
         if self.candle_interval not in {1, 5, 15, 25, 60}:
             raise ValueError("CANDLE_INTERVAL_MIN must be one of 1, 5, 15, 25, 60")
+        from .strategy import SIGNALS
+
+        if self.signal not in SIGNALS:
+            raise ValueError(f"SIGNAL must be one of {', '.join(SIGNALS)}")
+        if self.signal == "orb" and self.orb_minutes % self.candle_interval:
+            raise ValueError("ORB_MINUTES must be a multiple of CANDLE_INTERVAL_MIN")
+        if self.rsi_sell >= self.rsi_buy:
+            raise ValueError("RSI_SELL must be below RSI_BUY")
+        if self.trail_trigger_pct < 0 or not (0 <= self.trail_pct < 100):
+            raise ValueError("TRAIL_TRIGGER_PCT must be >= 0 and TRAIL_PCT in [0, 100)")
         if self.fast_ema >= self.slow_ema:
             raise ValueError("FAST_EMA must be smaller than SLOW_EMA")
         if not (self.entry_start < self.entry_end < self.square_off):

@@ -1,4 +1,4 @@
-"""Entry point:  python -m dhan_autotrader [--strategy equity|nifty-options] [--check] [--confirm-live]"""
+"""Entry point:  python -m dhan_autotrader [--strategy equity|options] [--check] [--confirm-live]"""
 from __future__ import annotations
 
 import argparse
@@ -9,14 +9,17 @@ import sys
 from .broker import BrokerError, DhanBroker, PaperBroker
 from .bot import TradingBot
 from .config import Config
-from .options import NiftyOptionsBot, OptionSettings
-from .strategy import EmaCrossover
+from .notify import build_notifier
+from .options import OptionSettings, OptionsRunner
+from .strategy import SIGNALS, build_strategy
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="dhan_autotrader", description="Dhan auto-trading bot")
-    p.add_argument("--strategy", choices=["equity", "nifty-options"], default=os.environ.get("STRATEGY", "equity"),
-                   help="equity = EMA crossover on stocks; nifty-options = buy NIFTY CE/PE on index crossover")
+    p.add_argument("--strategy", choices=["equity", "options", "nifty-options"],
+                   default=os.environ.get("STRATEGY", "equity"),
+                   help="equity = trade stocks; options = buy OTM CE/PE on NIFTY/BANKNIFTY/... (nifty-options = alias)")
+    p.add_argument("--signal", choices=SIGNALS, help="entry signal (overrides SIGNAL in .env)")
     p.add_argument("--check", action="store_true", help="only verify the Dhan connection and exit")
     p.add_argument("--confirm-live", action="store_true", help="required to place REAL orders when TRADING_MODE=live")
     p.add_argument("-v", "--verbose", action="store_true")
@@ -31,8 +34,10 @@ def main(argv: list[str] | None = None) -> int:
     log = logging.getLogger("dhan_autotrader")
 
     try:
+        if args.signal:
+            os.environ["SIGNAL"] = args.signal
         cfg = Config.from_env()
-        opt = OptionSettings.from_env() if args.strategy == "nifty-options" else None
+        opt = OptionSettings.from_env() if args.strategy in ("options", "nifty-options") else None
     except ValueError as exc:
         log.error("Config error: %s", exc)
         return 2
@@ -50,11 +55,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         return 0
 
-    strategy = EmaCrossover(cfg.fast_ema, cfg.slow_ema)
+    strategy = build_strategy(cfg)
+    notifier = build_notifier(cfg)
     if opt:
-        NiftyOptionsBot(cfg, opt, broker, strategy).run()
+        OptionsRunner(cfg, opt, broker, strategy, notifier=notifier).run()
     else:
-        TradingBot(cfg, broker, strategy).run()
+        TradingBot(cfg, broker, strategy, notifier=notifier).run()
     return 0
 
 
