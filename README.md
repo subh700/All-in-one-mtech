@@ -9,6 +9,10 @@ An intraday auto-trading bot for **Dhan** (DhanHQ API v2), built on the official
   - Daily loss limit across everything: when it's hit, the bot closes all positions and stops trading for the day
   - Caps on trades per day and on open positions
   - An entry time window and an automatic square-off at 15:15 IST
+- **Signal confirmation:** combine signals, for example `SIGNAL=supertrend,rsi`.
+- **Backtesting** on Dhan's historical candles, including a side-by-side comparison of every signal.
+- **Automatic daily login** with your PIN and TOTP, so you don't have to paste a token every day.
+- **Trade journal** (`logs/trades.csv`) and **crash recovery:** a restart during the day resumes open positions.
 - **Telegram alerts** for every entry, exit, trailing-stop activation and error, plus a daily P&L summary.
 - **Paper mode by default.** It uses real Dhan market data and simulates the fills. Live orders need `TRADING_MODE=live` **and** the `--confirm-live` flag.
 
@@ -19,7 +23,15 @@ An intraday auto-trading bot for **Dhan** (DhanHQ API v2), built on the official
 3. **Static IP:** Dhan requires a whitelisted static IP before the API will accept *orders*. Register the public IP of the machine or VPS that runs the bot. Market data and paper mode work without this.
 4. **Options:** F&O trading must be activated on your Dhan account.
 
-> Access tokens expire. Generate a new one in Dhan when the bot reports an auth error.
+> Access tokens expire. To avoid refreshing them by hand, use **automatic login** (below).
+
+### Automatic daily login (PIN + TOTP)
+
+1. On Dhan, enable **TOTP** (Profile → Security, or DhanHQ API settings). When it shows the QR code, also copy the **secret key** (the text version of the code).
+2. In `.env`, set `DHAN_PIN=<your 4-digit PIN>` and `DHAN_TOTP_SECRET=<secret>`. You can leave `DHAN_ACCESS_TOKEN` empty.
+3. Every morning the bot creates its own 6-digit code, gets a fresh access token, and caches it for the day in `state/token.json` (readable only by you).
+
+> Your PIN and TOTP secret give full access to your account. Keep `.env` private (it's git-ignored) and run the bot only on a machine you control.
 
 ## 2. Install
 
@@ -36,6 +48,7 @@ python -m dhan_autotrader --check                                   # verify con
 python -m dhan_autotrader --strategy options                        # OTM options, paper
 python -m dhan_autotrader --strategy options --signal supertrend    # use a different signal
 python -m dhan_autotrader --strategy equity                         # stocks, paper
+python -m dhan_autotrader --strategy options --backtest 60 --signal all   # compare signals on history
 python -m dhan_autotrader -v                                        # log every candle's signal
 ```
 
@@ -70,6 +83,50 @@ Each signal fires only on the candle where its condition **changes**, never repe
 > **ORB:** the bot only enters after `ENTRY_START`, so keep `ENTRY_START` at or after the end of the range (09:30 for 15 minutes).
 
 All signals run on closed candles of `CANDLE_INTERVAL_MIN` (1, 5, 15, 25 or 60 minutes).
+
+### Signal confirmation (combining signals)
+
+List several signals separated by commas. The **first** one triggers the entry, and **every other one must agree** with its current reading:
+
+| Filter | Agrees with a bullish trigger when… |
+|---|---|
+| `ema` | the fast EMA is above the slow EMA |
+| `supertrend` | Supertrend is in an uptrend |
+| `rsi` | RSI > 50 |
+| `vwap` | price is above VWAP |
+| `orb` | price is above the opening-range high |
+
+```bash
+python -m dhan_autotrader --strategy options --signal supertrend,rsi       # fewer, higher-quality entries
+python -m dhan_autotrader --strategy options --signal ema,vwap,supertrend
+```
+
+## Backtesting
+
+Test signals on recent Dhan history **before** you risk money:
+
+```bash
+python -m dhan_autotrader --strategy options --backtest 60 --signal all          # compare all 5 signals
+python -m dhan_autotrader --strategy options --backtest 90 --signal supertrend,rsi
+python -m dhan_autotrader --strategy equity  --backtest 60 --signal all
+```
+
+Example output:
+```
+signal      trades  win%  net P&L  avg win  avg loss  profit factor  max DD
+----------  ------  ----  -------  -------  --------  -------------  ------
+ema             89   51%   35,646    1,800    -1,031           1.79   7,282
+supertrend      85   52%   34,997    2,161    -1,465           1.58   7,289
+...
+```
+(The numbers above are illustrative and came from random data.) Every trade is written to `logs/backtest_trades.csv`.
+
+The simulation uses the same rules as the live bot:
+- Signals use closed candles, and fills happen at the **next candle's open**.
+- Entries only inside the entry window, square-off at 15:15, and the trades-per-day cap applies.
+- Stop-loss, target and trailing stop are checked against each candle's high and low. If both the stop and the target could have been hit in the same candle, the stop is assumed (the conservative choice).
+
+> **Options backtests are estimates.** Dhan doesn't provide easy historical premiums for each strike, so trades are simulated on the **index** (CE = index up, PE = index down). Option P&L ≈ index points × delta (`--bt-delta`, default 0.4) × lot size × `OPT_MAX_LOTS`. Premium % levels are converted to index % levels (OPT_SL_PCT 25% ≈ a 0.3% index move). Brokerage, slippage, time decay and IV changes are **not** included, so real results will be worse. Use backtests to **compare signals**, not to predict profit.
 
 ## Options trading: OTM CE / PE buying (`STRATEGY=options`)
 
@@ -129,6 +186,14 @@ Example with options defaults (trigger 20%, trail 15%), buying at a premium of �
 Set `OPT_TARGET_PCT=0` to drop the fixed target and let the trailing stop ride big moves.
 For stocks, use `TRAIL_TRIGGER_PCT` / `TRAIL_PCT` (off by default).
 
+## Trade journal and crash recovery
+
+- **Journal:** every closed trade is added to `logs/trades.csv` with the date, mode, strategy, symbol, side, qty, entry, exit, P&L, exit reason and times. It opens directly in Excel or Google Sheets.
+- **Crash recovery:** after every entry, exit and trailing-stop move, the bot saves its open positions, today's trade count, realized P&L, halt status and last processed candle to `state/<strategy>_<mode>.json`.
+- **Restarting on the same day** (after a crash, a reboot or Ctrl+C): the bot resumes managing those positions with their stops, and it won't re-enter on a signal it already traded.
+- **Live mode:** each restored position is checked against your Dhan positions. If it's already closed it's dropped, and if the quantity differs Dhan's quantity is used.
+- Saved state from a previous day is ignored.
+
 ## Telegram alerts
 
 1. In Telegram, message **@BotFather**, send `/newbot`, and copy the **token**.
@@ -174,7 +239,10 @@ dhan_autotrader/
   strategy.py  indicators + signals: EMA, Supertrend, RSI, VWAP, ORB
   risk.py      positions, sizing, SL/target, trailing stop, daily limits
   options.py   index presets, option chain, OTM strike/expiry selection, multi-index runner
-  bot.py       stock trading loop + shared session loop (daily summary)
+  bot.py       stock trading loop + shared session loop (daily summary, restore)
+  backtest.py  historical simulation + signal comparison
+  journal.py   trade journal CSV + same-day state persistence
+  login.py     automatic PIN + TOTP login with daily token cache
   notify.py    Telegram alerts
 tests/         unit tests using a fake Dhan client (pytest)
 ```

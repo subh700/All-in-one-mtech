@@ -49,6 +49,8 @@ def parse_instruments(raw: str) -> list[Instrument]:
 class Config:
     client_id: str = ""
     access_token: str = ""
+    pin: str = ""
+    totp_secret: str = ""
     mode: str = "paper"
     instruments: list[Instrument] = field(default_factory=list)
 
@@ -90,7 +92,9 @@ class Config:
         e = os.environ.get
         cfg = cls(
             client_id=e("DHAN_CLIENT_ID", ""),
-            access_token=e("DHAN_ACCESS_TOKEN", ""),
+            access_token=e("DHAN_ACCESS_TOKEN", "").strip(),
+            pin=e("DHAN_PIN", "").strip(),
+            totp_secret=e("DHAN_TOTP_SECRET", "").strip(),
             mode=e("TRADING_MODE", "paper").strip().lower(),
             instruments=parse_instruments(e("INSTRUMENTS", "HDFCBANK:1333:NSE_EQ")),
             signal=e("SIGNAL", "ema").strip().lower(),
@@ -127,11 +131,10 @@ class Config:
             raise ValueError("TRADING_MODE must be 'paper' or 'live'")
         if self.candle_interval not in {1, 5, 15, 25, 60}:
             raise ValueError("CANDLE_INTERVAL_MIN must be one of 1, 5, 15, 25, 60")
-        from .strategy import SIGNALS
+        from .strategy import parse_signal
 
-        if self.signal not in SIGNALS:
-            raise ValueError(f"SIGNAL must be one of {', '.join(SIGNALS)}")
-        if self.signal == "orb" and self.orb_minutes % self.candle_interval:
+        names = parse_signal(self.signal)
+        if "orb" in names and self.orb_minutes % self.candle_interval:
             raise ValueError("ORB_MINUTES must be a multiple of CANDLE_INTERVAL_MIN")
         if self.rsi_sell >= self.rsi_buy:
             raise ValueError("RSI_SELL must be below RSI_BUY")
@@ -143,5 +146,8 @@ class Config:
             raise ValueError("Require ENTRY_START < ENTRY_END < SQUARE_OFF")
         if self.stop_loss_pct <= 0 or self.target_pct <= 0:
             raise ValueError("STOP_LOSS_PCT and TARGET_PCT must be positive")
-        if not self.client_id or not self.access_token:
-            raise ValueError("DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN are required (even paper mode reads live market data)")
+        if not self.client_id:
+            raise ValueError("DHAN_CLIENT_ID is required")
+        if not self.access_token and not (self.pin and self.totp_secret):
+            raise ValueError("Set DHAN_ACCESS_TOKEN, or DHAN_PIN + DHAN_TOTP_SECRET for automatic daily login "
+                             "(even paper mode reads live market data)")

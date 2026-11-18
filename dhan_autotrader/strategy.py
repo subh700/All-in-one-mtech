@@ -103,6 +103,13 @@ class Strategy:
     def on_candles(self, candles: list["Candle"]) -> Signal:
         return self.signal([c.close for c in candles])
 
+    def bias(self, candles: list["Candle"]) -> int:
+        """Current market state per this indicator: +1 bullish, -1 bearish, 0 neutral/unknown.
+
+        Used as a confirmation filter when signals are combined (SIGNAL=supertrend,rsi).
+        """
+        return 0
+
     def signal(self, closes: list[float]) -> Signal:  # pragma: no cover - interface
         raise NotImplementedError
 
@@ -129,6 +136,13 @@ class EmaCrossover(Strategy):
             return Signal.SELL
         return Signal.HOLD
 
+    def bias(self, candles):
+        closes = [c.close for c in candles]
+        if len(closes) < self.min_bars:
+            return 0
+        d = ema(closes, self.fast)[-1] - ema(closes, self.slow)[-1]
+        return (d > 0) - (d < 0)
+
 
 class SupertrendStrategy(Strategy):
     """BUY when Supertrend flips up, SELL when it flips down."""
@@ -147,6 +161,11 @@ class SupertrendStrategy(Strategy):
         if d[-2] == 1 and d[-1] == -1:
             return Signal.SELL
         return Signal.HOLD
+
+    def bias(self, candles):
+        if len(candles) < self.period * 3:
+            return 0
+        return supertrend(candles, self.period, self.mult)[-1]
 
 
 class RsiMomentum(Strategy):
@@ -168,6 +187,13 @@ class RsiMomentum(Strategy):
         if r[-2] >= self.sell > r[-1]:
             return Signal.SELL
         return Signal.HOLD
+
+    def bias(self, candles):
+        closes = [c.close for c in candles]
+        if len(closes) < self.period * 3:
+            return 0
+        r = rsi(closes, self.period)[-1]
+        return (r > 50) - (r < 50)
 
 
 class VwapCross(Strategy):
@@ -206,6 +232,13 @@ class VwapCross(Strategy):
             return Signal.SELL
         return Signal.HOLD
 
+    def bias(self, candles):
+        today = _today(candles)
+        if not today:
+            return 0
+        d = today[-1].close - self.vwap_series(today)[-1]
+        return (d > 0) - (d < 0)
+
 
 class OpeningRangeBreakout(Strategy):
     """BUY on the first close above the opening-range high, SELL on a close below its low."""
@@ -243,12 +276,54 @@ class OpeningRangeBreakout(Strategy):
             return Signal.SELL
         return Signal.HOLD
 
+    def bias(self, candles):
+        r = self.opening_range(_today(candles))
+        if not r:
+            return 0
+        c = candles[-1].close
+        return 1 if c > r[0] else -1 if c < r[1] else 0
+
+
+class Confirmed(Strategy):
+    """First strategy triggers; every other one must agree via its bias.
+
+    e.g. SIGNAL=supertrend,rsi -> a Supertrend flip up is taken only if RSI > 50.
+    """
+
+    def __init__(self, trigger: Strategy, filters: list[Strategy]):
+        self.trigger, self.filters = trigger, filters
+        self.name = "+".join([trigger.name] + [f.name for f in filters])
+
+    def on_candles(self, candles):
+        sig = self.trigger.on_candles(candles)
+        if sig is Signal.HOLD:
+            return sig
+        want = 1 if sig is Signal.BUY else -1
+        return sig if all(f.bias(candles) == want for f in self.filters) else Signal.HOLD
+
+    def bias(self, candles):
+        b = [self.trigger.bias(candles)] + [f.bias(candles) for f in self.filters]
+        return b[0] if all(x == b[0] for x in b) else 0
+
 
 SIGNALS = ("ema", "supertrend", "rsi", "vwap", "orb")
 
 
+def parse_signal(raw: str) -> list[str]:
+    names = [n.strip().lower() for n in raw.split(",") if n.strip()]
+    bad = [n for n in names if n not in SIGNALS]
+    if not names or bad:
+        raise ValueError(f"SIGNAL must be one or more of {', '.join(SIGNALS)} (comma-separated), got '{raw}'")
+    return names
+
+
 def build_strategy(cfg: "Config") -> Strategy:
-    name = cfg.signal
+    names = parse_signal(cfg.signal)
+    built = [_build_one(n, cfg) for n in names]
+    return built[0] if len(built) == 1 else Confirmed(built[0], built[1:])
+
+
+def _build_one(name: str, cfg: "Config") -> Strategy:
     if name == "ema":
         return EmaCrossover(cfg.fast_ema, cfg.slow_ema)
     if name == "supertrend":

@@ -7,6 +7,8 @@ from datetime import datetime
 
 from .broker import IST, BrokerError, DhanBroker
 from .config import Config, Instrument
+from .journal import (NullJournal, NullStore, StateStore, TradeJournal, position_from_dict, position_to_dict,
+                      risk_from_dict, risk_to_dict)
 from .notify import Notifier
 from .risk import Position, RiskManager
 from .strategy import Signal, Strategy
@@ -14,11 +16,30 @@ from .strategy import Signal, Strategy
 log = logging.getLogger(__name__)
 
 
+def verify_restored(broker, security_id: str, pos: Position) -> bool:
+    """In live mode, make sure a restored position still exists at Dhan (adjust qty if it differs)."""
+    try:
+        n = broker.net_quantity(security_id)
+    except BrokerError as exc:
+        log.warning("Could not verify restored %s with Dhan (%s) — keeping it", pos.symbol, exc)
+        return True
+    if n is None:
+        return True
+    if n == 0:
+        log.warning("Restored %s is no longer open at Dhan — dropping it", pos.symbol)
+        return False
+    if abs(n) != pos.qty:
+        log.warning("Restored %s qty %d differs from Dhan net qty %d — using Dhan's", pos.symbol, pos.qty, n)
+        pos.qty = abs(n)
+    return True
+
+
 def run_session(bot, title: str) -> None:
     """Poll `bot.tick()` until square-off time; square off on Ctrl+C; send a daily summary."""
     cfg, clock, notifier = bot.cfg, bot.clock, bot.notifier
     log.info("Starting %s", title)
-    notifier.send(f"🤖 Started: {title}")
+    restored = bot.restore()
+    notifier.send(f"🤖 Started: {title}" + (f" — resumed {restored} open position(s)" if restored else ""))
     try:
         while True:
             now = clock()
@@ -44,13 +65,45 @@ def run_session(bot, title: str) -> None:
 
 class TradingBot:
     def __init__(self, cfg: Config, broker: DhanBroker, strategy: Strategy, clock=None,
-                 notifier: Notifier | None = None):
+                 notifier: Notifier | None = None, journal: TradeJournal | None = None,
+                 store: StateStore | None = None):
         self.cfg, self.broker, self.strategy = cfg, broker, strategy
+        self.journal = journal or NullJournal()
+        self.store = store or NullStore()
         self.risk = RiskManager(cfg)
         self.positions: dict[str, Position] = {}
         self.clock = clock or (lambda: datetime.now(IST))
         self.notifier = notifier or Notifier()
         self._last_bar: dict[str, datetime] = {}
+
+    # ---- persistence ---------------------------------------------------
+    def save_state(self) -> None:
+        self.store.save(self.clock().date(), {
+            "kind": "equity", "risk": risk_to_dict(self.risk),
+            "positions": {k: position_to_dict(p) for k, p in self.positions.items()},
+            "last_bar": {k: v.isoformat() for k, v in self._last_bar.items()},
+        })
+
+    def restore(self) -> int:
+        today = self.clock().date()
+        data = self.store.load(today)
+        if not data or data.get("kind") != "equity":
+            return 0
+        risk_from_dict(self.risk, data.get("risk", {}), today)
+        # don't re-act on a candle that was already traded before the restart
+        self._last_bar.update({k: datetime.fromisoformat(v) for k, v in data.get("last_bar", {}).items()})
+        by_symbol = {i.symbol: i for i in self.cfg.instruments}
+        for sym, d in data.get("positions", {}).items():
+            inst = by_symbol.get(sym)
+            pos = position_from_dict(d)
+            if inst is None:
+                log.warning("Restored %s is not in INSTRUMENTS — close it manually in Dhan", sym)
+                continue
+            if verify_restored(self.broker, inst.security_id, pos):
+                self.positions[sym] = pos
+                log.info("Resumed %s %s x%d @ %.2f | SL %.2f", pos.side, sym, pos.qty, pos.entry, pos.stop)
+        self.save_state()
+        return len(self.positions)
 
     # ---- one iteration -------------------------------------------------
     def tick(self) -> None:
@@ -90,9 +143,12 @@ class TradingBot:
         if not pos:
             return
         price = self.broker.ltp(inst)
+        old_stop = pos.stop
         if pos.update_trail(price, self.cfg.trail_trigger_pct, self.cfg.trail_pct):
             log.info("%s trailing stop active, SL now %.2f", inst.symbol, pos.stop)
             self.notifier.send(f"🔒 {inst.symbol} trailing stop active — SL {pos.stop:.2f}")
+        if pos.stop != old_stop:
+            self.save_state()  # remember the ratcheted stop across restarts
         reason = pos.exit_reason(price)
         if reason:
             self._close(inst, reason)
@@ -105,6 +161,7 @@ class TradingBot:
         if self._last_bar.get(inst.symbol) == last:
             return  # already acted on this bar
         self._last_bar[inst.symbol] = last
+        self.save_state()
 
         sig = self.strategy.on_candles(candles)
         pos = self.positions.get(inst.symbol)
@@ -148,6 +205,7 @@ class TradingBot:
         stop, target = self.risk.brackets(side, fill.price)
         self.positions[inst.symbol] = Position(inst.symbol, side, qty, fill.price, stop, target, self.clock())
         self.risk.record_entry()
+        self.save_state()
         msg = f"{side} {inst.symbol} x{qty} @ {fill.price:.2f} | SL {stop:.2f} | TGT {target:.2f}"
         log.info("OPEN %s", msg)
         self.notifier.send(f"🟢 OPEN {msg}")
@@ -161,6 +219,8 @@ class TradingBot:
         pnl = pos.pnl(fill.price)
         del self.positions[inst.symbol]
         self.risk.record_exit(pnl)
+        self.journal.record(pos, fill.price, pnl, reason, self.clock())
+        self.save_state()
         msg = (f"{inst.symbol} x{pos.qty} @ {fill.price:.2f} ({reason}) "
                f"P&L ₹{pnl:,.2f} | day ₹{self.risk.realized_pnl:,.2f}")
         log.info("CLOSE %s", msg)
@@ -177,6 +237,7 @@ class TradingBot:
                     self._error(f"Square-off {inst.symbol} failed: {exc} — using exit_all", key="sqoff")
                     self.broker.exit_all()
                     self.positions.clear()
+                    self.save_state()
                     return
 
     def run(self) -> None:

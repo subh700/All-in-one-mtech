@@ -21,6 +21,8 @@ from datetime import date, datetime
 
 from .broker import IST, BrokerError, DhanBroker, _unwrap
 from .config import Config, Instrument, _bool
+from .journal import (NullJournal, NullStore, StateStore, TradeJournal, position_from_dict, position_to_dict,
+                      risk_from_dict, risk_to_dict)
 from .notify import Notifier
 from .risk import Position, RiskManager
 from .strategy import Signal, Strategy
@@ -194,8 +196,11 @@ class IndexOptionsBot:
 
     def __init__(self, cfg: Config, settings: OptionSettings, spec: IndexSpec, broker: DhanBroker,
                  strategy: Strategy, risk: RiskManager | None = None, chain: OptionChainClient | None = None,
-                 clock=None, notifier: Notifier | None = None, open_count=None):
+                 clock=None, notifier: Notifier | None = None, open_count=None,
+                 journal: TradeJournal | None = None, on_change=None):
         self.cfg, self.s, self.spec, self.broker, self.strategy = cfg, settings, spec, broker, strategy
+        self.journal = journal or NullJournal()
+        self.on_change = on_change or (lambda: None)
         self.risk = risk or RiskManager(cfg)
         self.chain = chain or OptionChainClient(broker, settings, spec)
         self.clock = clock or (lambda: datetime.now(IST))
@@ -255,9 +260,12 @@ class IndexOptionsBot:
     def _manage_exit(self) -> None:
         op = self.position
         ltp = self.broker.ltp(op.contract.inst)
+        old_stop = op.pos.stop
         if op.pos.update_trail(ltp, self.s.trail_trigger_pct, self.s.trail_pct):
             log.info("%s trailing stop active, SL now %.2f", op.contract.inst.symbol, op.pos.stop)
             self.notifier.send(f"🔒 {op.contract.inst.symbol} trailing stop active — SL {op.pos.stop:.2f}")
+        if op.pos.stop != old_stop:
+            self.on_change()
         reason = op.pos.exit_reason(ltp)
         if not reason and self.risk.realized_pnl + op.pos.pnl(ltp) <= -abs(self.cfg.max_daily_loss):
             reason = "daily loss limit"
@@ -270,6 +278,7 @@ class IndexOptionsBot:
         if not candles or candles[-1].ts == self._last_bar:
             return
         self._last_bar = candles[-1].ts
+        self.on_change()
         sig = self.strategy.on_candles(candles)
         log.debug("%s bar %s close %.2f -> %s", self.spec.name, self._last_bar, candles[-1].close, sig.value)
         if sig is Signal.HOLD:
@@ -299,6 +308,7 @@ class IndexOptionsBot:
         self.position = OptionPosition(contract, Position(contract.inst.symbol, "BUY", qty, fill.price,
                                                           stop, target, self.clock()))
         self.risk.record_entry()
+        self.on_change()
         msg = (f"BUY {contract.inst.symbol} x{qty} ({lots} lot) @ {fill.price:.2f} | SL {stop:.2f} | "
                f"TGT {'trail' if math.isinf(target) else f'{target:.2f}'} | risk ≈ ₹{(fill.price - stop) * qty:,.0f}")
         log.info("OPEN %s", msg)
@@ -312,6 +322,8 @@ class IndexOptionsBot:
         pnl = op.pos.pnl(fill.price)
         self.position = None
         self.risk.record_exit(pnl)
+        self.journal.record(op.pos, fill.price, pnl, reason, self.clock())
+        self.on_change()
         msg = (f"{op.contract.inst.symbol} x{op.pos.qty} @ {fill.price:.2f} ({reason}) "
                f"P&L ₹{pnl:,.2f} | day ₹{self.risk.realized_pnl:,.2f}")
         log.info("CLOSE %s", msg)
@@ -326,23 +338,71 @@ class IndexOptionsBot:
             self._error(f"{self.spec.name} square-off failed: {exc} — using exit_all", key="sqoff")
             self.broker.exit_all()
             self.position = None
+            self.on_change()
 
 
 class OptionsRunner:
     """Runs one IndexOptionsBot per enabled index with shared risk limits."""
 
     def __init__(self, cfg: Config, settings: OptionSettings, broker: DhanBroker, strategy: Strategy,
-                 clock=None, notifier: Notifier | None = None, chains: dict[str, OptionChainClient] | None = None):
-        self.cfg, self.s = cfg, settings
+                 clock=None, notifier: Notifier | None = None, chains: dict[str, OptionChainClient] | None = None,
+                 journal: TradeJournal | None = None, store: StateStore | None = None):
+        self.cfg, self.s, self.broker = cfg, settings, broker
+        self.store = store or NullStore()
         self.clock = clock or (lambda: datetime.now(IST))
         self.notifier = notifier or Notifier()
         self.risk = RiskManager(cfg)
         chains = chains or {}
         self.bots = [
             IndexOptionsBot(cfg, settings, spec, broker, strategy, risk=self.risk, chain=chains.get(spec.name),
-                            clock=self.clock, notifier=self.notifier, open_count=self.open_count)
+                            clock=self.clock, notifier=self.notifier, open_count=self.open_count,
+                            journal=journal, on_change=self.save_state)
             for spec in settings.indices
         ]
+
+    # ---- persistence ---------------------------------------------------
+    def save_state(self) -> None:
+        positions = {}
+        for b in self.bots:
+            if b.position:
+                c = b.position.contract
+                positions[b.spec.name] = {
+                    "contract": {"symbol": c.inst.symbol, "security_id": c.inst.security_id,
+                                 "segment": c.inst.exchange_segment, "kind": c.kind, "strike": c.strike,
+                                 "expiry": c.expiry, "ltp": c.ltp},
+                    "pos": position_to_dict(b.position.pos),
+                }
+        last_bar = {b.spec.name: b._last_bar.isoformat() for b in self.bots if b._last_bar}
+        self.store.save(self.clock().date(), {"kind": "options", "risk": risk_to_dict(self.risk),
+                                              "positions": positions, "last_bar": last_bar})
+
+    def restore(self) -> int:
+        from .bot import verify_restored
+
+        today = self.clock().date()
+        data = self.store.load(today)
+        if not data or data.get("kind") != "options":
+            return 0
+        risk_from_dict(self.risk, data.get("risk", {}), today)
+        bots = {b.spec.name: b for b in self.bots}
+        for name, ts in data.get("last_bar", {}).items():
+            if name in bots:
+                bots[name]._last_bar = datetime.fromisoformat(ts)
+        for name, d in data.get("positions", {}).items():
+            c, pos = d["contract"], position_from_dict(d["pos"])
+            bot = bots.get(name)
+            if bot is None:
+                log.warning("Restored %s position but %s is not in OPT_INDICES — close it manually in Dhan",
+                            c["symbol"], name)
+                continue
+            if not verify_restored(self.broker, c["security_id"], pos):
+                continue
+            contract = OptionContract(Instrument(c["symbol"], c["security_id"], c["segment"]), c["kind"],
+                                      c["strike"], c["expiry"], c["ltp"])
+            bot.position = OptionPosition(contract, pos)
+            log.info("Resumed %s x%d @ %.2f | SL %.2f", c["symbol"], pos.qty, pos.entry, pos.stop)
+        self.save_state()
+        return self.open_count()
 
     def open_count(self) -> int:
         return sum(1 for b in self.bots if b.position)

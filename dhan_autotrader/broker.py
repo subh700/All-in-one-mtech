@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 import time as _time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from .config import Config, Instrument
 
@@ -85,6 +85,31 @@ class DhanBroker:
         cutoff = now - timedelta(minutes=interval)
         return [c for c in candles if c.ts <= cutoff]
 
+    def history(self, inst: Instrument, interval: int, start: date, end: date, chunk_days: int = 60) -> list[Candle]:
+        """Intraday candles between two dates (inclusive), fetched in chunks Dhan accepts."""
+        out: list[Candle] = []
+        cur = start
+        while cur <= end:
+            stop = min(cur + timedelta(days=chunk_days), end + timedelta(days=1))
+            resp = self.api.intraday_minute_data(
+                security_id=inst.security_id, exchange_segment=inst.exchange_segment,
+                instrument_type=inst.instrument_type, from_date=cur.isoformat(), to_date=stop.isoformat(),
+                interval=interval,
+            )
+            d = _unwrap(resp, f"History {inst.symbol} {cur}..{stop}") or {}
+            ts = d.get("timestamp", []) if isinstance(d, dict) else []
+            out += [Candle(datetime.fromtimestamp(t, IST), o, h, l, c, v)
+                    for t, o, h, l, c, v in zip(ts, d.get("open", []), d.get("high", []), d.get("low", []),
+                                                d.get("close", []), d.get("volume", []))]
+            cur = stop
+            _time.sleep(0.3)  # stay well inside Dhan's data-API rate limit
+        seen, uniq = set(), []
+        for c in sorted(out, key=lambda c: c.ts):
+            if c.ts not in seen:
+                seen.add(c.ts)
+                uniq.append(c)
+        return uniq
+
     def ltp(self, inst: Instrument) -> float:
         wait = self.LTP_MIN_INTERVAL - (_time.monotonic() - self._last_ltp)
         if wait > 0:
@@ -129,6 +154,14 @@ class DhanBroker:
                 raise BrokerError(f"Order {order_id} not filled within {timeout}s (status {status})")
             _time.sleep(1)
 
+    def net_quantity(self, security_id: str) -> int | None:
+        """Open intraday quantity Dhan reports for a security (used to verify restored positions)."""
+        data = _unwrap(self.api.get_positions(), "Positions") or []
+        for p in data if isinstance(data, list) else []:
+            if str(p.get("securityId")) == str(security_id):
+                return int(p.get("netQty") or 0)
+        return 0
+
     def exit_all(self) -> None:
         log.warning("Exiting ALL open positions via Dhan")
         _unwrap(self.api.exit_all_positions(), "Exit all positions")
@@ -146,6 +179,9 @@ class PaperBroker(DhanBroker):
         price = self.ltp(inst)
         log.info("PAPER %s %d %s @ %.2f", side, qty, inst.symbol, price)
         return Fill(f"PAPER-{self._n}", price)
+
+    def net_quantity(self, security_id: str) -> int | None:
+        return None  # nothing to verify against in paper mode
 
     def exit_all(self) -> None:
         log.info("PAPER exit_all (no-op; bot closes its own simulated positions)")
