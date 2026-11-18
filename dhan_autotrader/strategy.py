@@ -335,3 +335,14 @@ def _build_one(name: str, cfg: "Config") -> Strategy:
     if name == "orb":
         return OpeningRangeBreakout(cfg.orb_minutes)
     raise ValueError(f"Unknown SIGNAL '{name}', choose from {', '.join(SIGNALS)}")
+
+
+def bias_report(candles: list["Candle"], cfg: "Config") -> dict[str, int]:
+    """Current reading of every indicator (+1 bullish, -1 bearish, 0 neutral) — for the market monitor."""
+    out = {}
+    for name in SIGNALS:
+        try:
+            out[name] = _build_one(name, cfg).bias(candles)
+        except Exception:  # an indicator must never break trading
+            out[name] = 0
+    return out

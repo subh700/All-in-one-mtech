@@ -17,6 +17,7 @@ An intraday auto-trading bot for **Dhan** (DhanHQ API v2), built on the official
 - **Extra risk guards:** a cap on ₹ risk per trade, a daily profit target, a cooldown after a loss, and a halt after N losses in a row.
 - **Real costs:** brokerage, STT, exchange fees, GST and stamp duty in the backtest, the journal and the exit alerts.
 - **Runs unattended:** `--daemon` mode, plus Docker and systemd files for a VPS.
+- **Web dashboard:** live P&L and positions, controls, a market and signal monitor, trade analytics, one-click backtests, logs and settings.
 - **Paper mode by default.** It uses real Dhan market data and simulates the fills. Live orders need `TRADING_MODE=live` **and** the `--confirm-live` flag.
 
 ## 1. Get Dhan API access
@@ -91,6 +92,40 @@ docker compose logs -f
 Logs rotate daily (`logs/bot.log`), and 30 days are kept.
 
 > Use a VPS whose **static IP is registered with Dhan**. Automatic login with PIN + TOTP is strongly recommended for daemon mode.
+
+## Web dashboard
+
+```bash
+python -m dhan_autotrader --strategy options --dashboard                  # trade + dashboard
+python -m dhan_autotrader --strategy options --daemon --dashboard         # 24/7
+python -m dhan_autotrader --strategy options --dashboard-only             # no trading: journal, backtests, logs
+```
+Then open **http://127.0.0.1:8050**.
+
+![Dashboard overview](docs/dashboard-overview.png)
+
+| Tab | What you get |
+|---|---|
+| **Overview** | Day P&L, realized and open P&L, trades used, open positions, and a daily-loss meter. Also a live intraday P&L chart, an open-positions table (LTP, P&L, SL, trailing), and **controls**: Pause / Resume / Square off all / Stop for today. |
+| **Market** | One card per index or stock: price, change, the strategy's last signal, and **what all 5 indicators read right now** (▲ bullish / ▼ bearish / – neutral) with a consensus bar. |
+| **Trades** | Journal analytics with date presets (Today / 7D / 30D / 90D / All), mode and symbol filters, net P&L, win rate, profit factor, average win and loss, and charges. Charts for daily net P&L bars and cumulative P&L, breakdowns by instrument and exit reason, a sortable trade log, and a CSV download. |
+| **Backtest** | Choose days, signals and combinations (for example `supertrend,rsi`), then run. It shows the best signal, equity curves for each signal, and a results table (gross, costs, net, profit factor, drawdown). |
+| **Logs** | A live tail of `logs/bot.log` with level filter, search and auto-refresh. |
+| **Settings** | Your current configuration, grouped and read-only. Secrets are never sent to the browser. |
+
+How it works:
+- Light and dark themes are available, and it works on phones.
+- Dashboard buttons go through the **same command queue as Telegram**. They run between bot cycles and are announced on Telegram as an audit trail.
+- The dashboard only reads a snapshot the bot publishes after each cycle. It never calls Dhan itself, except for backtests you start.
+
+![Backtest](docs/dashboard-backtest.png)
+
+**Security:**
+- By default it listens on **127.0.0.1 only**.
+- To reach it on a VPS, use an SSH tunnel: `ssh -L 8050:127.0.0.1:8050 you@vps`, then open http://127.0.0.1:8050 on your PC.
+- If you set `DASHBOARD_HOST=0.0.0.0`, you **must** also set `DASHBOARD_PASSWORD` (browser login, any username), or the bot refuses to start the dashboard. Put it behind HTTPS (for example Caddy or nginx) if it's exposed beyond a tunnel.
+- All actions need POST plus a custom header, so other websites can't trigger them (CSRF protection).
+- Docker: `docker-compose.yml` already runs `--daemon --dashboard` and publishes the port on the host's localhost. Set `DASHBOARD_PASSWORD` in `.env`.
 
 ## Entry signals (`SIGNAL=`)
 
@@ -320,6 +355,8 @@ dhan_autotrader/
   login.py     automatic PIN + TOTP login with daily token cache
   notify.py    Telegram alerts + remote commands
   costs.py     brokerage / STT / GST / stamp duty estimates
+  live.py      thread-safe live snapshot + command queue (Telegram & dashboard)
+  dashboard/   web dashboard: server.py (stdlib HTTP + JSON API) and static/index.html
 tests/         unit tests using a fake Dhan client (pytest)
 Dockerfile, docker-compose.yml, deploy/   unattended deployment
 ```

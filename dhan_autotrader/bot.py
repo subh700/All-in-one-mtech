@@ -12,7 +12,8 @@ from .journal import (NullJournal, NullStore, StateStore, TradeJournal, position
                       risk_from_dict, risk_to_dict)
 from .notify import Notifier
 from .risk import Position, RiskManager
-from .strategy import Signal, Strategy
+from .live import LIVE, Command
+from .strategy import Signal, Strategy, bias_report
 
 log = logging.getLogger(__name__)
 
@@ -83,9 +84,12 @@ def run_session(bot, title: str, commands=None) -> bool:
     """
     interrupted = False
     cfg, clock, notifier = bot.cfg, bot.clock, bot.notifier
+    bot.title = title
     log.info("Starting %s", title)
     restored = bot.restore()
     notifier.send(f"🤖 Started: {title}" + (f" — resumed {restored} open position(s)" if restored else ""))
+    LIVE.attach()
+    LIVE.publish(bot.snapshot())
     try:
         while True:
             now = clock()
@@ -93,6 +97,8 @@ def run_session(bot, title: str, commands=None) -> bool:
                 log.info("Weekend — market closed. Exiting.")
                 break
             bot.tick()
+            bot.record_pnl_point()
+            LIVE.publish(bot.snapshot())
             if bot.risk.must_square_off(now.time()):
                 log.info("Square-off time reached. Done for the day.")
                 break
@@ -101,13 +107,9 @@ def run_session(bot, title: str, commands=None) -> bool:
                 continue
             deadline = _time.monotonic() + cfg.poll_seconds
             while (left := deadline - _time.monotonic()) > 0:
-                cmd = commands.get(timeout=left)
-                if cmd:
-                    log.info("Telegram command %s", cmd)
-                    try:
-                        notifier.send(handle_command(bot, cmd))
-                    except BrokerError as exc:
-                        notifier.send(f"⚠️ {cmd} failed: {exc}")
+                item = commands.get(timeout=left)
+                if item:
+                    _execute(bot, item)
     except KeyboardInterrupt:
         interrupted = True
         log.warning("Interrupted — squaring off open positions")
@@ -119,9 +121,29 @@ def run_session(bot, title: str, commands=None) -> bool:
         log.info(summary)
         notifier.send(summary)
         notifier.close()
+        LIVE.publish(bot.snapshot())
+        LIVE.detach()
         if commands is not None:
             commands.close()
     return interrupted
+
+
+def _execute(bot, item) -> None:
+    """Run one command (a plain string from Telegram, or a hub Command from any source)."""
+    name = item if isinstance(item, str) else item.name
+    source = "telegram" if isinstance(item, str) else item.source
+    log.info("%s command %s", source.capitalize(), name)
+    try:
+        reply = handle_command(bot, name)
+    except BrokerError as exc:
+        reply = f"⚠️ {name} failed: {exc}"
+    if source == "telegram":
+        bot.notifier.send(reply)
+    elif name not in ("/status", "/pnl", "/help"):
+        bot.notifier.send(f"🖥 {source.capitalize()} {name}: {reply}")  # audit trail of remote actions
+    if isinstance(item, Command):
+        item.resolve(reply)
+    LIVE.publish(bot.snapshot())
 
 
 class TradingBot:
@@ -137,6 +159,10 @@ class TradingBot:
         self.notifier = notifier or Notifier()
         self.risk.on_halt = lambda reason: self.notifier.send(f"🛑 Halted for today: {reason}")
         self._last_bar: dict[str, datetime] = {}
+        self._ltp: dict[str, float] = {}
+        self._market: dict[str, dict] = {}
+        self._pnl_curve: list[tuple[str, float]] = []
+        self.title = "equity bot"
 
     # ---- persistence ---------------------------------------------------
     def save_state(self) -> None:
@@ -205,6 +231,7 @@ class TradingBot:
         if not pos:
             return
         price = self.broker.ltp(inst)
+        self._ltp[inst.symbol] = price
         old_stop = pos.stop
         if pos.update_trail(price, self.cfg.trail_trigger_pct, self.cfg.trail_pct):
             log.info("%s trailing stop active, SL now %.2f", inst.symbol, pos.stop)
@@ -226,6 +253,7 @@ class TradingBot:
         self.save_state()
 
         sig = self.strategy.on_candles(candles)
+        self._market[inst.symbol] = market_entry(inst.symbol, candles, sig, self.cfg)
         pos = self.positions.get(inst.symbol)
         log.debug("%s bar %s close %.2f -> %s", inst.symbol, last, candles[-1].close, sig.value)
         if sig is Signal.HOLD:
@@ -265,6 +293,7 @@ class TradingBot:
                      side, inst.symbol, price)
             return
         fill = self.broker.market_order(inst, side, qty, tag=f"bot-{inst.symbol}-open")
+        self._ltp[inst.symbol] = fill.price
         stop, target = self.risk.brackets(side, fill.price)
         self.positions[inst.symbol] = Position(inst.symbol, side, qty, fill.price, stop, target, self.clock())
         self.risk.record_entry()
@@ -320,6 +349,68 @@ class TradingBot:
     def unrealized_total(self) -> float:
         return self._unrealized()
 
+    # ---- dashboard -----------------------------------------------------
+    def _open_positions(self) -> list[tuple[Position, float]]:
+        return [(p, self._ltp.get(sym, p.entry)) for sym, p in self.positions.items()]
+
+    def record_pnl_point(self) -> None:
+        record_pnl_point(self)
+
+    def snapshot(self) -> dict:
+        return build_snapshot(self, "equity", self._open_positions(), list(self._market.values()))
+
     def run(self, commands=None) -> bool:
         return run_session(self, f"equity bot ({self.cfg.mode.upper()}) signal={self.strategy.name} on "
                           + ", ".join(i.symbol for i in self.cfg.instruments), commands=commands)
+
+
+# ---------------------------------------------------------------- dashboard helpers
+def market_entry(symbol: str, candles, sig, cfg) -> dict:
+    last = candles[-1]
+    prev_close = next((c.close for c in reversed(candles) if c.ts.date() < last.ts.date()), None)
+    return {
+        "symbol": symbol, "price": last.close, "bar_time": last.ts.isoformat(timespec="minutes"),
+        "change_pct": round((last.close / prev_close - 1) * 100, 2) if prev_close else None,
+        "signal": sig.value, "biases": bias_report(candles, cfg),
+    }
+
+
+def _fmt_target(t: float):
+    return None if t in (float("inf"), float("-inf")) else round(t, 2)
+
+
+def record_pnl_point(bot) -> None:
+    unreal = sum(p.pnl(ltp) for p, ltp in bot._open_positions())
+    total = round(bot.risk.realized_pnl + unreal, 2)
+    now = bot.clock().isoformat(timespec="seconds")
+    curve = bot._pnl_curve
+    if curve and curve[-1][0][:10] != now[:10]:
+        curve.clear()  # new day
+    curve.append((now, total))
+    del curve[:-3000]
+
+
+def build_snapshot(bot, kind: str, positions: list[tuple[Position, float]], market: list[dict]) -> dict:
+    risk, cfg = bot.risk, bot.cfg
+    unreal = sum(p.pnl(ltp) for p, ltp in positions)
+    state = "halted" if risk.halted else "paused" if risk.paused else "running"
+    return {
+        "kind": kind, "mode": cfg.mode, "title": getattr(bot, "title", kind), "strategy": bot.strategy.name,
+        "updated": bot.clock().isoformat(timespec="seconds"), "state": state, "halt_reason": risk.halt_reason,
+        "risk": {
+            "trades_today": risk.trades_today, "max_trades": cfg.max_trades_per_day,
+            "realized": round(risk.realized_pnl, 2), "unrealized": round(unreal, 2),
+            "max_daily_loss": cfg.max_daily_loss, "daily_profit_target": cfg.daily_profit_target,
+            "max_open_positions": cfg.max_open_positions, "consecutive_losses": risk.consecutive_losses,
+            "cooldown_until": risk.cooldown_until.isoformat(timespec="minutes") if risk.cooldown_until else None,
+        },
+        "positions": [{
+            "symbol": p.symbol, "side": p.side, "qty": p.qty, "entry": round(p.entry, 2), "ltp": round(ltp, 2),
+            "pnl": round(p.pnl(ltp), 2), "stop": round(p.stop, 2), "target": _fmt_target(p.target),
+            "trailing": p.trailing, "opened_at": p.opened_at.isoformat(timespec="minutes"),
+        } for p, ltp in positions],
+        "market": market,
+        "pnl_curve": list(bot._pnl_curve),
+        "session": {"entry_start": cfg.entry_start.strftime("%H:%M"), "entry_end": cfg.entry_end.strftime("%H:%M"),
+                    "square_off": cfg.square_off.strftime("%H:%M")},
+    }

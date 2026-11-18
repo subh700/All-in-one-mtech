@@ -9,4 +9,11 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./state:/app/state
-    command: ["--daemon"]          # live: ["--daemon", "--confirm-live"] with TRADING_MODE=live
+    # Dashboard: needs DASHBOARD_PASSWORD in .env (the container must listen on 0.0.0.0).
+    # The port is published on the host's localhost only — reach it via SSH tunnel:
+    #   ssh -L 8050:127.0.0.1:8050 you@your-vps   then open http://127.0.0.1:8050
+    environment:
+      DASHBOARD_HOST: 0.0.0.0
+    ports:
+      - "127.0.0.1:8050:8050"
+    command: ["--daemon", "--dashboard"]   # live: ["--daemon", "--dashboard", "--confirm-live"]

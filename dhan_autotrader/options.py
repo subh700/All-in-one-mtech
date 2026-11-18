@@ -209,6 +209,8 @@ class IndexOptionsBot:
         self.open_count = open_count or (lambda: 1 if self.position else 0)
         self.position: OptionPosition | None = None
         self._last_bar: datetime | None = None
+        self.last_ltp: float | None = None
+        self.market: dict | None = None
 
     # ---- sizing / brackets -------------------------------------------
     def lots_for(self, premium: float) -> int:
@@ -261,6 +263,7 @@ class IndexOptionsBot:
     def _manage_exit(self) -> None:
         op = self.position
         ltp = self.broker.ltp(op.contract.inst)
+        self.last_ltp = ltp
         old_stop = op.pos.stop
         if op.pos.update_trail(ltp, self.s.trail_trigger_pct, self.s.trail_pct):
             log.info("%s trailing stop active, SL now %.2f", op.contract.inst.symbol, op.pos.stop)
@@ -281,6 +284,9 @@ class IndexOptionsBot:
         self._last_bar = candles[-1].ts
         self.on_change()
         sig = self.strategy.on_candles(candles)
+        from .bot import market_entry
+
+        self.market = market_entry(self.spec.name, candles, sig, self.cfg)
         log.debug("%s bar %s close %.2f -> %s", self.spec.name, self._last_bar, candles[-1].close, sig.value)
         if sig is Signal.HOLD:
             return
@@ -306,6 +312,7 @@ class IndexOptionsBot:
                      contract.inst.symbol, premium, self.spec.lot_size, self.cfg.capital_per_trade)
             return
         fill = self.broker.market_order(contract.inst, "BUY", qty, tag=f"bot-{self.spec.name}-open")
+        self.last_ltp = fill.price
         stop, target = self.brackets(fill.price)
         self.position = OptionPosition(contract, Position(contract.inst.symbol, "BUY", qty, fill.price,
                                                           stop, target, self.clock()))
@@ -354,6 +361,8 @@ class OptionsRunner:
         self.notifier = notifier or Notifier()
         self.risk = RiskManager(cfg)
         self.risk.on_halt = lambda reason: self.notifier.send(f"🛑 Halted for today: {reason}")
+        self._pnl_curve: list[tuple[str, float]] = []
+        self.title = "options bot"
         chains = chains or {}
         self.bots = [
             IndexOptionsBot(cfg, settings, spec, broker, strategy, risk=self.risk, chain=chains.get(spec.name),
@@ -444,6 +453,29 @@ class OptionsRunner:
 
     def unrealized_total(self) -> float:
         return sum(b.unrealized() for b in self.bots)
+
+    # ---- dashboard -----------------------------------------------------
+    @property
+    def strategy(self):
+        return self.bots[0].strategy
+
+    def _open_positions(self):
+        return [(b.position.pos, b.last_ltp or b.position.pos.entry) for b in self.bots if b.position]
+
+    def record_pnl_point(self) -> None:
+        from .bot import record_pnl_point
+
+        record_pnl_point(self)
+
+    def snapshot(self) -> dict:
+        from .bot import build_snapshot
+
+        snap = build_snapshot(self, "options", self._open_positions(), [b.market for b in self.bots if b.market])
+        snap["indices"] = [b.spec.name for b in self.bots]
+        snap["options"] = {"strike_offset": self.s.strike_offset, "max_lots": self.s.max_lots,
+                           "sl_pct": self.s.sl_pct, "target_pct": self.s.target_pct,
+                           "trail_trigger_pct": self.s.trail_trigger_pct, "trail_pct": self.s.trail_pct}
+        return snap
 
     def run(self, commands=None) -> bool:
         from .bot import run_session

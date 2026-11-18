@@ -1,0 +1,763 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dhan Auto Trader</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --surface-2: #f3f2ee;
+  --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10);
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300;
+  --pos: #2a78d6; --neg: #e34948; --mid: #f0efec;
+  --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+  --up-text: #006300; --down-text: #c42f2f;
+  --accent: #2a78d6; --accent-ink: #ffffff;
+  --radius: 10px;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --surface-2: #232321;
+    --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #0ca30c;
+    --pos: #3987e5; --neg: #e66767; --mid: #383835;
+    --up-text: #0ca30c; --down-text: #e66767; --accent: #3987e5;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --surface-2: #232321;
+  --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #0ca30c;
+  --pos: #3987e5; --neg: #e66767; --mid: #383835;
+  --up-text: #0ca30c; --down-text: #e66767; --accent: #3987e5;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; }
+body { background: var(--page); color: var(--ink); font: 14px/1.45 var(--font); -webkit-font-smoothing: antialiased; }
+button, input, select { font: inherit; color: inherit; }
+a { color: var(--accent); }
+.num { font-variant-numeric: tabular-nums; }
+
+/* ---------- header & nav ---------- */
+header { position: sticky; top: 0; z-index: 20; background: var(--page); border-bottom: 1px solid var(--ring); }
+.bar { max-width: 1280px; margin: 0 auto; padding: 10px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.brand { font-weight: 700; font-size: 16px; letter-spacing: -0.01em; margin-right: auto; display: flex; align-items: center; gap: 8px; }
+.brand svg { width: 22px; height: 22px; flex: none; }
+.brand { min-width: 0; }
+.brand-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 480px) { .bar { flex-wrap: nowrap; gap: 8px; } .brand { font-size: 15px; } .badge { padding: 3px 8px; } }
+.badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid var(--ring); background: var(--surface); white-space: nowrap; }
+.badge.live { background: var(--critical); color: #fff; border-color: transparent; }
+.badge.paper { background: var(--surface-2); }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+.dot.good { background: var(--good); } .dot.warning { background: var(--warning); } .dot.critical { background: var(--critical); } .dot.off { background: var(--muted); }
+.iconbtn { border: 1px solid var(--ring); background: var(--surface); border-radius: 8px; padding: 6px 8px; cursor: pointer; display: inline-flex; }
+nav { max-width: 1280px; margin: 0 auto; padding: 0 16px; display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+nav a { padding: 9px 12px 10px; color: var(--ink-2); text-decoration: none; border-bottom: 2px solid transparent; white-space: nowrap; font-weight: 500; }
+nav a:hover { color: var(--ink); }
+nav a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--accent); }
+
+main { max-width: 1280px; margin: 0 auto; padding: 16px; }
+section[hidden] { display: none !important; }
+h2 { font-size: 18px; margin: 0 0 12px; letter-spacing: -0.01em; }
+h3 { font-size: 14px; margin: 0; font-weight: 600; }
+.sub { color: var(--ink-2); font-size: 13px; }
+.muted { color: var(--muted); }
+
+/* ---------- layout ---------- */
+.grid { display: grid; gap: 12px; }
+.tiles { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-bottom: 12px; }
+.two { grid-template-columns: 2fr 1fr; }
+.half { grid-template-columns: 1fr 1fr; }
+@media (max-width: 900px) { .two, .half { grid-template-columns: 1fr; } }
+.card { background: var(--surface); border: 1px solid var(--ring); border-radius: var(--radius); padding: 14px; min-width: 0; }
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.tile .label { color: var(--ink-2); font-size: 12px; font-weight: 500; }
+.tile .value { font-size: 24px; font-weight: 650; letter-spacing: -0.02em; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.tile .foot { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.up { color: var(--up-text); } .down { color: var(--down-text); }
+.notice { background: var(--surface); border: 1px solid var(--ring); border-left: 4px solid var(--warning); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 12px; display: flex; gap: 10px; align-items: flex-start; }
+.notice.info { border-left-color: var(--accent); }
+.notice.bad { border-left-color: var(--critical); }
+.notice code, .sub code { font-family: var(--mono); font-size: 12px; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+
+/* ---------- controls ---------- */
+.btn { border: 1px solid var(--ring); background: var(--surface); padding: 7px 14px; border-radius: 8px; cursor: pointer; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
+.btn:hover:not(:disabled) { background: var(--surface-2); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+.btn.primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--accent); }
+.btn.danger { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 40%, transparent); }
+.btn.danger.solid { background: var(--critical); color: #fff; }
+.controls { display: flex; gap: 8px; flex-wrap: wrap; }
+.filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.seg { display: inline-flex; border: 1px solid var(--ring); border-radius: 8px; overflow: hidden; background: var(--surface); }
+.seg button { border: 0; background: transparent; padding: 6px 11px; cursor: pointer; font-weight: 500; color: var(--ink-2); }
+.seg button[aria-pressed="true"] { background: var(--surface-2); color: var(--ink); font-weight: 650; }
+input[type=text], input[type=number], select, textarea { background: var(--surface); border: 1px solid var(--ring); border-radius: 8px; padding: 6px 10px; }
+input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible, svg:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+label.check { display: inline-flex; gap: 6px; align-items: center; padding: 5px 10px; border: 1px solid var(--ring); border-radius: 8px; background: var(--surface); cursor: pointer; }
+
+/* ---------- tables ---------- */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { color: var(--ink-2); font-weight: 600; font-size: 12px; position: sticky; top: 0; background: var(--surface); }
+th.r, td.r { text-align: right; }
+tbody tr:hover { background: var(--surface-2); }
+th[data-sort] { cursor: pointer; user-select: none; }
+.empty { color: var(--muted); padding: 18px 4px; text-align: center; }
+.pill { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--surface-2); }
+
+/* ---------- charts ---------- */
+.chart { position: relative; width: 100%; }
+.chart svg { display: block; width: 100%; overflow: visible; }
+.chart text { fill: var(--muted); font-size: 11px; font-family: var(--font); }
+.chart .tick line { stroke: var(--grid); }
+.chart .baseline { stroke: var(--axis); }
+.tooltip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--ring); border-radius: 8px; padding: 7px 10px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.12); min-width: 120px; z-index: 5; display: none; }
+.tooltip .t { color: var(--ink-2); margin-bottom: 4px; }
+.tooltip .row { display: flex; align-items: center; gap: 8px; }
+.tooltip .key { width: 12px; height: 2px; border-radius: 1px; flex: none; }
+.tooltip strong { font-variant-numeric: tabular-nums; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); margin-top: 8px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 14px; height: 2px; border-radius: 1px; display: inline-block; }
+.legend i.box { width: 10px; height: 10px; border-radius: 3px; }
+
+/* ---------- market ---------- */
+.mkt { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.mkt .price { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.ind { display: flex; justify-content: space-between; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--grid); }
+.ind:last-child { border-bottom: 0; }
+.bias { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: 12px; }
+.bias .sw { width: 10px; height: 10px; border-radius: 3px; }
+.consensus { height: 8px; border-radius: 4px; overflow: hidden; display: flex; gap: 2px; background: var(--surface); margin: 8px 0 4px; }
+.consensus div { height: 100%; }
+
+/* ---------- meter ---------- */
+.meter { height: 8px; background: var(--surface-2); border-radius: 4px; overflow: hidden; margin-top: 8px; }
+.meter > div { height: 100%; border-radius: 4px; }
+
+/* ---------- logs ---------- */
+pre.logs { margin: 0; font: 12px/1.55 var(--mono); max-height: 65vh; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+pre.logs .ERROR, pre.logs .CRITICAL { color: var(--down-text); }
+pre.logs .WARNING { color: var(--ink); font-weight: 600; }
+pre.logs .DEBUG { color: var(--muted); }
+
+/* ---------- settings ---------- */
+dl.kv { display: grid; grid-template-columns: minmax(140px, 1fr) 1.4fr; margin: 0; }
+dl.kv dt, dl.kv dd { padding: 6px 0; border-bottom: 1px solid var(--grid); margin: 0; }
+dl.kv dt { color: var(--ink-2); font-family: var(--mono); font-size: 12px; }
+dl.kv dd { font-variant-numeric: tabular-nums; word-break: break-word; }
+
+/* ---------- dialog & toast ---------- */
+dialog { border: 1px solid var(--ring); border-radius: 12px; background: var(--surface); color: var(--ink); padding: 18px; max-width: 420px; width: calc(100% - 32px); }
+dialog::backdrop { background: rgba(0,0,0,.45); }
+dialog .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+#toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--page); padding: 10px 16px; border-radius: 10px; max-width: min(560px, calc(100% - 32px)); white-space: pre-line; z-index: 50; display: none; box-shadow: 0 6px 24px rgba(0,0,0,.25); }
+.spin { width: 14px; height: 14px; border: 2px solid var(--grid); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading { opacity: .55; transition: opacity .2s; }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="2" y="2" width="20" height="20" rx="6" fill="var(--accent)"/><path d="M6 15l4-4 3 3 5-6" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span class="brand-name">Dhan Auto Trader</span>
+    </div>
+    <span id="hdr-mode" class="badge paper">—</span>
+    <span id="hdr-state" class="badge"><span class="dot off"></span><span>Connecting…</span></span>
+    <button class="iconbtn" id="theme" type="button" aria-label="Toggle light / dark theme" title="Light / dark"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></svg></button>
+  </div>
+  <nav aria-label="Sections">
+    <a href="#overview">Overview</a>
+    <a href="#market">Market</a>
+    <a href="#trades">Trades</a>
+    <a href="#backtest">Backtest</a>
+    <a href="#logs">Logs</a>
+    <a href="#settings">Settings</a>
+  </nav>
+</header>
+
+<main>
+  <!-- ================= OVERVIEW ================= -->
+  <section id="view-overview">
+    <div id="ov-notice"></div>
+    <div class="grid tiles" id="ov-tiles"></div>
+    <div class="grid two">
+      <div class="card">
+        <div class="card-head"><h3>Today's P&amp;L</h3><span class="sub" id="ov-updated"></span></div>
+        <div class="chart" id="ov-chart"></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>Controls</h3></div>
+        <div class="controls" id="ov-controls">
+          <button class="btn" id="btn-pause" type="button">Pause entries</button>
+          <button class="btn" id="btn-resume" type="button">▶ Resume</button>
+          <button class="btn danger" id="btn-squareoff" type="button">Square off all</button>
+          <button class="btn danger solid" id="btn-stop" type="button">■ Stop for today</button>
+        </div>
+        <p class="sub" style="margin:10px 0 0">Commands run between bot cycles (within ~<span id="ov-poll">20</span>s), the same way Telegram commands do, and every action is announced on Telegram.</p>
+        <div style="margin-top:14px" id="ov-session"></div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:12px">
+      <div class="card-head"><h3>Open positions</h3><span class="sub" id="ov-poscount"></span></div>
+      <div class="table-wrap" id="ov-positions"></div>
+    </div>
+  </section>
+
+  <!-- ================= MARKET ================= -->
+  <section id="view-market" hidden>
+    <div class="card-head"><h2 style="margin:0">Market &amp; signal monitor</h2><span class="sub" id="mk-updated"></span></div>
+    <p class="sub" style="margin-top:0">What every indicator currently reads for each instrument, updated on each closed candle while the bot is evaluating entries. The active strategy's last signal is shown at the top of each card.</p>
+    <div class="grid mkt" id="mk-cards"></div>
+  </section>
+
+  <!-- ================= TRADES ================= -->
+  <section id="view-trades" hidden>
+    <div class="filters" role="group" aria-label="Trade filters">
+      <div class="seg" id="tr-range" role="group" aria-label="Date range">
+        <button type="button" data-days="1">Today</button>
+        <button type="button" data-days="7">7D</button>
+        <button type="button" data-days="30" aria-pressed="true">30D</button>
+        <button type="button" data-days="90">90D</button>
+        <button type="button" data-days="0">All</button>
+      </div>
+      <select id="tr-mode" aria-label="Mode"><option value="">All modes</option><option value="paper">Paper</option><option value="live">Live</option></select>
+      <input type="text" id="tr-search" placeholder="Filter symbol / strategy…" aria-label="Filter symbol or strategy">
+      <a class="btn" href="api/trades.csv" download>⬇ CSV</a>
+    </div>
+    <div class="grid tiles" id="tr-tiles"></div>
+    <div class="grid half">
+      <div class="card"><div class="card-head"><h3>Daily net P&amp;L</h3><span class="sub">after charges</span></div><div class="chart" id="tr-daily"></div></div>
+      <div class="card"><div class="card-head"><h3>Cumulative net P&amp;L</h3></div><div class="chart" id="tr-cum"></div></div>
+    </div>
+    <div class="grid half" style="margin-top:12px">
+      <div class="card"><div class="card-head"><h3>By instrument</h3></div><div class="table-wrap" id="tr-bysym"></div></div>
+      <div class="card"><div class="card-head"><h3>Exit reasons</h3></div><div class="table-wrap" id="tr-reasons"></div></div>
+    </div>
+    <div class="card" style="margin-top:12px">
+      <div class="card-head"><h3>Trade log</h3><span class="sub" id="tr-count"></span></div>
+      <div class="table-wrap" id="tr-table"></div>
+    </div>
+  </section>
+
+  <!-- ================= BACKTEST ================= -->
+  <section id="view-backtest" hidden>
+    <div class="card">
+      <div class="card-head"><h3>Run a backtest</h3><span class="sub" id="bt-kind"></span></div>
+      <form id="bt-form" class="grid" style="gap:12px">
+        <div class="filters" style="margin:0">
+          <label>Days <input type="number" id="bt-days" min="1" max="365" value="60" style="width:90px"></label>
+          <span class="sub">Signals:</span>
+          <span id="bt-signals" class="filters" style="margin:0"></span>
+        </div>
+        <label class="sub">Combinations (optional, one per line; first triggers, others confirm)
+          <textarea id="bt-combos" rows="2" placeholder="supertrend,rsi&#10;ema,vwap" style="display:block;width:100%;margin-top:4px;font-family:var(--mono);font-size:12px"></textarea>
+        </label>
+        <div class="filters" style="margin:0"><button class="btn primary" type="submit" id="bt-run">Run backtest</button><span id="bt-status" class="sub"></span></div>
+      </form>
+    </div>
+    <div id="bt-note"></div>
+    <div id="bt-results" style="margin-top:12px"></div>
+  </section>
+
+  <!-- ================= LOGS ================= -->
+  <section id="view-logs" hidden>
+    <div class="filters">
+      <div class="seg" id="lg-level" role="group" aria-label="Log level">
+        <button type="button" data-level="" aria-pressed="true">All</button>
+        <button type="button" data-level="INFO">Info+</button>
+        <button type="button" data-level="WARNING">Warnings+</button>
+        <button type="button" data-level="ERROR">Errors</button>
+      </div>
+      <input type="text" id="lg-search" placeholder="Search logs…" aria-label="Search logs">
+      <select id="lg-lines" aria-label="Lines"><option>200</option><option selected>500</option><option>1000</option><option>3000</option></select>
+      <label class="check"><input type="checkbox" id="lg-auto" checked> Auto-refresh</label>
+    </div>
+    <div class="card"><pre class="logs" id="lg-pre" tabindex="0" aria-label="Log output"></pre></div>
+  </section>
+
+  <!-- ================= SETTINGS ================= -->
+  <section id="view-settings" hidden>
+    <div class="notice info"><div>Settings are read from <code>.env</code> and are <strong>read-only here</strong>. Edit <code>.env</code> and restart the bot to change them. Secrets are never sent to the browser.</div></div>
+    <div class="grid half" id="st-groups"></div>
+  </section>
+</main>
+
+<dialog id="confirm">
+  <h3 id="cf-title" style="font-size:16px"></h3>
+  <p id="cf-body" class="sub"></p>
+  <div class="actions"><button class="btn" value="cancel" id="cf-cancel" type="button">Cancel</button><button class="btn danger solid" id="cf-ok" type="button">Confirm</button></div>
+</dialog>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+"use strict";
+/* ============================================================ utilities */
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+function el(tag, attrs = {}, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") n.className = v;
+    else if (k === "style") n.style.cssText = v;
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+    else n.setAttribute(k, v === true ? "" : v);
+  }
+  for (const k of kids.flat(Infinity)) if (k != null && k !== false) n.append(k instanceof Node ? k : document.createTextNode(String(k)));
+  return n;
+}
+const SVGNS = "http://www.w3.org/2000/svg";
+function sv(tag, attrs = {}) { const n = document.createElementNS(SVGNS, tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v); return n; }
+const inr0 = new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 });
+const inr2 = new Intl.NumberFormat("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const money = (v, dp = 0) => v == null || isNaN(v) ? "—" : (v < 0 ? "−₹" : "₹") + (dp ? inr2 : inr0).format(Math.abs(v));
+const signed = (v, dp = 0) => v == null || isNaN(v) ? "—" : (v > 0 ? "+" : "") + money(v, dp);
+const price = v => v == null ? "—" : inr2.format(v);
+const pnlClass = v => v > 0 ? "up" : v < 0 ? "down" : "";
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const SERIES = ["--s1", "--s2", "--s3", "--s4", "--s5", "--s6"];
+/* Market times are always shown in IST, whatever the viewer's timezone. */
+const TZ = "Asia/Kolkata";
+function fmtTime(iso) { const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: TZ }); }
+function fmtDate(iso) { const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", timeZone: TZ }); }
+function fmtDateTime(iso) { const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", hour12: false, timeZone: TZ }); }
+const istDay = d => new Intl.DateTimeFormat("en-CA", { timeZone: TZ }).format(d);   // YYYY-MM-DD
+function ago(iso) { const s = (Date.now() - new Date(iso)) / 1000; if (!isFinite(s)) return ""; if (s < 60) return Math.max(0, Math.round(s)) + "s ago"; if (s < 3600) return Math.round(s / 60) + "m ago"; return fmtDateTime(iso); }
+async function api(path, opts = {}) {
+  const r = await fetch(path, { ...opts, headers: { "Content-Type": "application/json", "X-Requested-With": "dashboard", ...(opts.headers || {}) } });
+  let data = {}; try { data = await r.json(); } catch (e) { /* non-json */ }
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+let toastTimer;
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.style.display = "block"; clearTimeout(toastTimer); toastTimer = setTimeout(() => t.style.display = "none", 5000); }
+function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
+function tile(label, value, foot, cls = "") { return el("div", { class: "card tile" }, el("div", { class: "label" }, label), el("div", { class: "value " + cls }, value), foot ? el("div", { class: "foot" }, foot) : null); }
+function table(cols, rows, { empty = "Nothing to show", sortable = false, onSort } = {}) {
+  if (!rows.length) return el("div", { class: "empty" }, empty);
+  const head = el("tr", {}, cols.map(c => el("th", { class: c.r ? "r" : "", "data-sort": sortable && c.key ? c.key : null, scope: "col", onclick: sortable && c.key ? () => onSort(c.key) : null }, c.label)));
+  const body = rows.map(r => el("tr", {}, cols.map(c => { const v = c.render ? c.render(r) : r[c.key]; return el("td", { class: (c.r ? "r " : "") + (c.cls ? c.cls(r) : "") }, v instanceof Node ? v : (v ?? "—")); })));
+  return el("table", {}, el("thead", {}, head), el("tbody", {}, body));
+}
+
+/* ============================================================ charts */
+function niceTicks(min, max, count = 5) {
+  if (min === max) { min -= 1; max += 1; }
+  const span = max - min, step0 = span / count, mag = Math.pow(10, Math.floor(Math.log10(step0)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => span / s <= count) || 10 * mag;
+  const lo = Math.floor(min / step) * step, hi = Math.ceil(max / step) * step, out = [];
+  for (let v = lo; v <= hi + step / 2; v += step) out.push(Math.round(v / step) * step);
+  return out;
+}
+const shortMoney = v => { const a = Math.abs(v); const s = v < 0 ? "−" : ""; return a >= 1e7 ? s + "₹" + (a / 1e7).toFixed(1) + "Cr" : a >= 1e5 ? s + "₹" + (a / 1e5).toFixed(1) + "L" : a >= 1e3 ? s + "₹" + (a / 1e3).toFixed(a >= 1e4 ? 0 : 1) + "k" : s + "₹" + Math.round(a); };
+
+/* Line chart. series: [{name, color(var), points: [[Date|ms, y], ...], step?}] */
+function lineChart(host, series, { height = 240, yFmt = shortMoney, tipFmt = v => signed(v, 2), xFmt = fmtTime, tipX = fmtDateTime, emptyText = "No data yet", directLabels = false, legend = series.length > 1 } = {}) {
+  host.replaceChildren();
+  const pts = series.flatMap(s => s.points);
+  if (!pts.length) { host.append(el("div", { class: "empty", style: `height:${height}px;display:flex;align-items:center;justify-content:center` }, emptyText)); return; }
+  const W = Math.max(280, host.clientWidth || 600), labelW = directLabels ? 84 : 0;
+  const m = { l: 52, r: 12 + labelW, t: 10, b: 26 }, iw = W - m.l - m.r, ih = height - m.t - m.b;
+  const xs = pts.map(p => +new Date(p[0])), ys = pts.map(p => p[1]).concat([0]);
+  let x0 = Math.min(...xs), x1 = Math.max(...xs); if (x0 === x1) { x0 -= 60000; x1 += 60000; }
+  const ticks = niceTicks(Math.min(...ys), Math.max(...ys)), y0 = ticks[0], y1 = ticks[ticks.length - 1];
+  const X = t => m.l + (t - x0) / (x1 - x0) * iw, Y = v => m.t + ih - (v - y0) / (y1 - y0) * ih;
+  const svg = sv("svg", { viewBox: `0 0 ${W} ${height}`, height, role: "img", tabindex: 0, "aria-label": series.map(s => s.name).join(", ") + " line chart" });
+  for (const t of ticks) {
+    const g = sv("g", { class: "tick" });
+    g.append(sv("line", { x1: m.l, x2: m.l + iw, y1: Y(t), y2: Y(t), "stroke-width": 1, class: t === 0 ? "baseline" : "" }));
+    const tx = sv("text", { x: m.l - 8, y: Y(t) + 4, "text-anchor": "end" }); tx.textContent = yFmt(t); g.append(tx); svg.append(g);
+  }
+  const nx = Math.max(2, Math.min(6, Math.floor(iw / 110)));
+  for (let i = 0; i <= nx; i++) { const t = x0 + (x1 - x0) * i / nx; const tx = sv("text", { x: X(t), y: height - 6, "text-anchor": i === 0 ? "start" : i === nx ? "end" : "middle" }); tx.textContent = xFmt(new Date(t)); svg.append(tx); }
+  const sorted = series.map(s => ({ ...s, pts: s.points.map(p => [+new Date(p[0]), p[1]]).sort((a, b) => a[0] - b[0]) }));
+  const labels = [];
+  for (const s of sorted) {
+    let d = ""; s.pts.forEach((p, i) => { if (s.step && i) d += `L${X(p[0])},${Y(s.pts[i - 1][1])}`; d += (i ? "L" : "M") + X(p[0]) + "," + Y(p[1]); });
+    if (s.pts.length === 1) svg.append(sv("circle", { cx: X(s.pts[0][0]), cy: Y(s.pts[0][1]), r: 4, fill: css(s.color) }));
+    svg.append(sv("path", { d, fill: "none", stroke: css(s.color), "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+    const last = s.pts[s.pts.length - 1]; labels.push({ y: Y(last[1]), name: s.name, x: X(last[0]) });
+  }
+  if (directLabels) { labels.sort((a, b) => a.y - b.y); for (let i = 1; i < labels.length; i++) labels[i].y = Math.max(labels[i].y, labels[i - 1].y + 13);
+    for (const l of labels) { const tx = sv("text", { x: m.l + iw + 8, y: l.y + 4 }); tx.style.fill = css("--ink-2"); tx.textContent = l.name; svg.append(tx); } }
+  const cross = sv("line", { y1: m.t, y2: m.t + ih, stroke: css("--axis"), "stroke-width": 1, visibility: "hidden" }); svg.append(cross);
+  const dots = sorted.map(s => { const c = sv("circle", { r: 4, fill: css(s.color), stroke: css("--surface"), "stroke-width": 2, visibility: "hidden" }); svg.append(c); return c; });
+  const hit = sv("rect", { x: m.l, y: m.t, width: iw, height: ih, fill: "transparent" }); svg.append(hit);
+  const tip = el("div", { class: "tooltip" }); host.append(svg, tip);
+  const allX = [...new Set(sorted.flatMap(s => s.pts.map(p => p[0])))].sort((a, b) => a - b);
+  let idx = -1;
+  function show(i) {
+    idx = Math.max(0, Math.min(allX.length - 1, i)); const t = allX[idx], cx = X(t);
+    cross.setAttribute("x1", cx); cross.setAttribute("x2", cx); cross.setAttribute("visibility", "visible");
+    tip.replaceChildren(el("div", { class: "t" }, tipX(new Date(t))));
+    sorted.forEach((s, k) => {
+      let p = null; for (const q of s.pts) { if (q[0] <= t) p = q; else break; }
+      if (!p) { dots[k].setAttribute("visibility", "hidden"); return; }
+      dots[k].setAttribute("cx", X(p[0] === t ? t : t)); dots[k].setAttribute("cy", Y(p[1])); dots[k].setAttribute("visibility", "visible");
+      tip.append(el("div", { class: "row" }, el("span", { class: "key", style: `background:${css(s.color)}` }), el("strong", {}, tipFmt(p[1])), sorted.length > 1 ? el("span", { class: "muted" }, s.name) : null));
+    });
+    tip.style.display = "block";
+    const rect = host.getBoundingClientRect(), scale = rect.width / W, left = cx * scale;
+    tip.style.left = Math.min(rect.width - tip.offsetWidth - 4, Math.max(0, left + 12)) + "px"; tip.style.top = "6px";
+  }
+  function hide() { cross.setAttribute("visibility", "hidden"); dots.forEach(d => d.setAttribute("visibility", "hidden")); tip.style.display = "none"; }
+  hit.addEventListener("pointermove", e => { const r = svg.getBoundingClientRect(); const t = x0 + ((e.clientX - r.left) * W / r.width - m.l) / iw * (x1 - x0); let best = 0; allX.forEach((x, i) => { if (Math.abs(x - t) < Math.abs(allX[best] - t)) best = i; }); show(best); });
+  hit.addEventListener("pointerleave", hide);
+  svg.addEventListener("focus", () => show(idx < 0 ? allX.length - 1 : idx)); svg.addEventListener("blur", hide);
+  svg.addEventListener("keydown", e => { if (e.key === "ArrowLeft") { show(idx - 1); e.preventDefault(); } if (e.key === "ArrowRight") { show(idx + 1); e.preventDefault(); } });
+  if (legend) host.append(el("div", { class: "legend" }, series.map(s => el("span", {}, el("i", { style: `background:${css(s.color)}` }), s.name))));
+}
+
+/* Diverging bar chart (profit = blue, loss = red). bars: [{label, value, tip}] */
+function barChart(host, bars, { height = 240, yFmt = shortMoney, emptyText = "No data" } = {}) {
+  host.replaceChildren();
+  if (!bars.length) { host.append(el("div", { class: "empty", style: `height:${height}px;display:flex;align-items:center;justify-content:center` }, emptyText)); return; }
+  const W = Math.max(280, host.clientWidth || 600), m = { l: 52, r: 8, t: 10, b: 26 }, iw = W - m.l - m.r, ih = height - m.t - m.b;
+  const ticks = niceTicks(Math.min(0, ...bars.map(b => b.value)), Math.max(0, ...bars.map(b => b.value)));
+  const y0 = ticks[0], y1 = ticks[ticks.length - 1], Y = v => m.t + ih - (v - y0) / (y1 - y0) * ih;
+  const svg = sv("svg", { viewBox: `0 0 ${W} ${height}`, height, role: "img", "aria-label": "Daily net profit and loss bar chart" });
+  for (const t of ticks) { const g = sv("g", { class: "tick" }); g.append(sv("line", { x1: m.l, x2: m.l + iw, y1: Y(t), y2: Y(t), class: t === 0 ? "baseline" : "" })); const tx = sv("text", { x: m.l - 8, y: Y(t) + 4, "text-anchor": "end" }); tx.textContent = yFmt(t); g.append(tx); svg.append(g); }
+  const slot = iw / bars.length, bw = Math.max(2, Math.min(28, slot - 2)), r = Math.min(4, bw / 2);
+  const tip = el("div", { class: "tooltip" });
+  const labelEvery = Math.ceil(bars.length / Math.max(2, Math.floor(iw / 70)));
+  bars.forEach((b, i) => {
+    const x = m.l + i * slot + (slot - bw) / 2, yv = Y(b.value), yz = Y(0), h = Math.max(1, Math.abs(yz - yv)), top = Math.min(yv, yz);
+    const color = css(b.value >= 0 ? "--pos" : "--neg");
+    // rounded data end, square baseline end
+    const d = b.value >= 0
+      ? `M${x},${top + h}V${top + r}Q${x},${top} ${x + r},${top}H${x + bw - r}Q${x + bw},${top} ${x + bw},${top + r}V${top + h}Z`
+      : `M${x},${top}V${top + h - r}Q${x},${top + h} ${x + r},${top + h}H${x + bw - r}Q${x + bw},${top + h} ${x + bw},${top + h - r}V${top}Z`;
+    const path = sv("path", { d, fill: color }); svg.append(path);
+    const hit = sv("rect", { x: m.l + i * slot, y: m.t, width: slot, height: ih, fill: "transparent", tabindex: 0, "aria-label": `${b.label}: ${signed(b.value, 2)}` });
+    const on = () => { path.setAttribute("opacity", ".75"); tip.replaceChildren(el("div", { class: "t" }, b.label), el("div", { class: "row" }, el("span", { class: "key", style: `background:${color}` }), el("strong", {}, signed(b.value, 2))), b.tip ? el("div", { class: "muted" }, b.tip) : null); tip.style.display = "block"; const rect = host.getBoundingClientRect(), sc = rect.width / W; tip.style.left = Math.min(rect.width - tip.offsetWidth - 4, Math.max(0, (x + bw) * sc + 8)) + "px"; tip.style.top = "6px"; };
+    const off = () => { path.removeAttribute("opacity"); tip.style.display = "none"; };
+    hit.addEventListener("pointerenter", on); hit.addEventListener("pointerleave", off); hit.addEventListener("focus", on); hit.addEventListener("blur", off);
+    svg.append(hit);
+    if (i % labelEvery === 0) { const tx = sv("text", { x: x + bw / 2, y: height - 6, "text-anchor": "middle" }); tx.textContent = b.short || b.label; svg.append(tx); }
+  });
+  host.append(svg, tip, el("div", { class: "legend" }, el("span", {}, el("i", { class: "box", style: `background:${css("--pos")}` }), "Profit day"), el("span", {}, el("i", { class: "box", style: `background:${css("--neg")}` }), "Loss day")));
+}
+
+/* ============================================================ theme */
+function applyTheme(t) { if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t); else document.documentElement.removeAttribute("data-theme"); }
+applyTheme(store("theme"));
+$("#theme").addEventListener("click", () => {
+  const cur = document.documentElement.getAttribute("data-theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  const next = cur === "dark" ? "light" : "dark"; applyTheme(next); store("theme", next); rerender();
+});
+
+/* ============================================================ routing */
+const VIEWS = ["overview", "market", "trades", "backtest", "logs", "settings"];
+let view = "overview";
+function route() {
+  view = VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "overview";
+  for (const v of VIEWS) $("#view-" + v).hidden = v !== view;
+  $$("nav a").forEach(a => a.setAttribute("aria-current", a.getAttribute("href") === "#" + view ? "page" : "false"));
+  refresh();
+}
+window.addEventListener("hashchange", route);
+
+/* ============================================================ live (overview + market) */
+let live = null;
+async function loadLive() {
+  try { live = await api("api/live"); } catch (e) { live = { running: false, error: e.message }; }
+  renderHeader(); if (view === "overview") renderOverview(); if (view === "market") renderMarket();
+}
+function renderHeader() {
+  const mode = $("#hdr-mode"), st = $("#hdr-state");
+  const m = live && live.mode ? live.mode : (cfgView && cfgView.config.mode) || "—";
+  mode.textContent = m === "live" ? "LIVE · real money" : m === "paper" ? "PAPER" : "—";
+  mode.className = "badge " + (m === "live" ? "live" : "paper");
+  let dot = "off", text = "Bot not running";
+  if (live && live.running) {
+    if (live.state === "halted") { dot = "critical"; text = "Halted"; }
+    else if (live.state === "paused") { dot = "warning"; text = "Paused"; }
+    else { dot = "good"; text = "Running"; }
+  } else if (live && live.error) text = "Dashboard offline";
+  st.replaceChildren(el("span", { class: "dot " + dot }), el("span", {}, text));
+  st.title = live && live.halt_reason ? live.halt_reason : "";
+}
+function renderOverview() {
+  const L = live || {}, R = L.risk || {}, running = !!L.running;
+  const note = $("#ov-notice"); note.replaceChildren();
+  if (!running) note.append(el("div", { class: "notice info" }, el("div", {}, el("strong", {}, L.updated ? "The bot is not running. Showing its last known state. " : "The bot is not running. "),
+    "Start it with ", el("code", {}, "python -m dhan_autotrader --strategy options --daemon --dashboard"), ". The Trades, Backtest, Logs and Settings tabs work without it.")));
+  else if (L.state === "halted") note.append(el("div", { class: "notice bad" }, el("div", {}, el("strong", {}, "■ Halted for today: "), L.halt_reason || "")));
+  else if (L.state === "paused") note.append(el("div", { class: "notice" }, el("div", {}, el("strong", {}, "⏸ Paused: "), "no new entries. Open positions are still managed (SL, target, trailing stop).")));
+  const total = (R.realized || 0) + (R.unrealized || 0);
+  const lossUsed = R.max_daily_loss ? Math.max(0, -Math.min(0, total)) / R.max_daily_loss : 0;
+  const meterColor = lossUsed >= 0.8 ? "--critical" : lossUsed >= 0.5 ? "--warning" : "--good";
+  const meterLabel = lossUsed >= 0.8 ? "Near limit" : lossUsed >= 0.5 ? "Caution" : "OK";
+  const lossTile = tile("Daily loss limit used", Math.round(lossUsed * 100) + "%", `${meterLabel} · limit ${money(R.max_daily_loss)}`);
+  lossTile.append(el("div", { class: "meter", role: "meter", "aria-valuenow": Math.round(lossUsed * 100), "aria-valuemin": 0, "aria-valuemax": 100, "aria-label": "Daily loss limit used" }, el("div", { style: `width:${Math.min(100, lossUsed * 100)}%;background:${css(meterColor)}` })));
+  $("#ov-tiles").replaceChildren(
+    tile("Today's P&L", signed(total), R.daily_profit_target ? `Target ${money(R.daily_profit_target)}` : "realized + open", pnlClass(total)),
+    tile("Realized", signed(R.realized), "booked today", pnlClass(R.realized)),
+    tile("Open P&L", signed(R.unrealized), "mark-to-market", pnlClass(R.unrealized)),
+    tile("Trades today", L.risk ? `${R.trades_today} / ${R.max_trades}` : "—", R.consecutive_losses ? `${R.consecutive_losses} loss(es) in a row` : (R.cooldown_until ? `Cooldown until ${fmtTime(R.cooldown_until)}` : "")),
+    tile("Open positions", L.positions ? `${L.positions.length} / ${R.max_open_positions}` : "—", L.strategy ? "signal: " + L.strategy : ""),
+    lossTile);
+  $("#ov-updated").textContent = L.updated ? "updated " + ago(L.published || L.updated) : "";
+  const curve = (L.pnl_curve || []).map(p => [p[0], p[1]]), chartHost = $("#ov-chart");
+  // don't redraw under the reader's pointer/focus — it would wipe the tooltip every refresh
+  if (!(chartHost.matches(":hover") || chartHost.contains(document.activeElement)) || !chartHost.firstChild)
+    lineChart(chartHost, [{ name: "Today's P&L", color: "--s1", points: curve }], { height: innerWidth > 900 ? 300 : 240, emptyText: running ? "Waiting for the first cycle…" : "No P&L recorded today", tipX: fmtTime });
+  // controls
+  $("#btn-pause").hidden = L.state === "paused"; $("#btn-resume").hidden = L.state !== "paused";
+  for (const b of $$("#ov-controls button")) b.disabled = !running || (L.state === "halted" && b.id !== "btn-squareoff");
+  // session
+  const S = L.session || {}, O = L.options;
+  const sess = $("#ov-session"); sess.replaceChildren();
+  if (L.session) sess.append(el("dl", { class: "kv" },
+    el("dt", {}, "strategy"), el("dd", {}, L.kind === "options" ? `Options · ${(L.indices || []).join(", ")}` : "Equity"),
+    el("dt", {}, "signal"), el("dd", {}, L.strategy || "—"),
+    el("dt", {}, "entries"), el("dd", {}, `${S.entry_start}–${S.entry_end}`),
+    el("dt", {}, "square-off"), el("dd", {}, S.square_off),
+    O ? [el("dt", {}, "strike"), el("dd", {}, O.strike_offset > 0 ? `${O.strike_offset} OTM` : O.strike_offset === 0 ? "ATM" : `${-O.strike_offset} ITM`),
+         el("dt", {}, "SL / target"), el("dd", {}, `${O.sl_pct}% / ${O.target_pct ? O.target_pct + "%" : "trail only"}`),
+         el("dt", {}, "trailing"), el("dd", {}, O.trail_trigger_pct ? `from +${O.trail_trigger_pct}%, ${O.trail_pct}% gap` : "off")] : null));
+  // positions
+  const pos = L.positions || [];
+  $("#ov-poscount").textContent = pos.length ? `${pos.length} open` : "";
+  $("#ov-positions").replaceChildren(table([
+    { label: "Symbol", key: "symbol" },
+    { label: "Side", render: p => el("span", { class: "pill" }, p.side === "BUY" ? "▲ Long" : "▼ Short") },
+    { label: "Qty", key: "qty", r: true },
+    { label: "Entry", r: true, render: p => price(p.entry) },
+    { label: "LTP", r: true, render: p => price(p.ltp) },
+    { label: "P&L", r: true, render: p => signed(p.pnl, 2), cls: p => pnlClass(p.pnl) },
+    { label: "Stop", r: true, render: p => price(p.stop) + (p.trailing ? " · trailing" : "") },
+    { label: "Target", r: true, render: p => p.target == null ? "trail" : price(p.target) },
+    { label: "Opened", render: p => fmtTime(p.opened_at) },
+  ], pos, { empty: running ? "No open positions. The bot is waiting for a signal." : "No open positions" }));
+}
+function renderMarket() {
+  const L = live || {}, cards = $("#mk-cards"), mk = L.market || [];
+  $("#mk-updated").textContent = L.updated ? "updated " + ago(L.published || L.updated) : "";
+  cards.replaceChildren();
+  if (!mk.length) { cards.append(el("div", { class: "card empty" }, L.running ? "No candles evaluated yet. This fills in on the first closed candle inside the entry window." : "Start the bot to see live indicator readings.")); return; }
+  const NAMES = { ema: "EMA crossover", supertrend: "Supertrend", rsi: "RSI", vwap: "VWAP", orb: "Opening range" };
+  for (const m of mk) {
+    const b = m.biases || {}, vals = Object.values(b), bull = vals.filter(v => v > 0).length, bear = vals.filter(v => v < 0).length, neu = vals.length - bull - bear;
+    const sigTxt = m.signal === "BUY" ? "▲ Bullish signal" : m.signal === "SELL" ? "▼ Bearish signal" : "No new signal";
+    cards.append(el("div", { class: "card" },
+      el("div", { class: "card-head", style: "margin-bottom:4px" }, el("h3", {}, m.symbol), el("span", { class: "pill" }, sigTxt)),
+      el("div", { class: "price" }, price(m.price), " ", m.change_pct == null ? null : el("span", { class: "sub " + pnlClass(m.change_pct) }, (m.change_pct > 0 ? "+" : "") + m.change_pct + "%")),
+      el("div", { class: "sub" }, "candle " + fmtDateTime(m.bar_time)),
+      el("div", { class: "consensus", role: "img", "aria-label": `${bull} bullish, ${neu} neutral, ${bear} bearish` },
+        bull ? el("div", { style: `flex:${bull};background:${css("--pos")}` }) : null,
+        neu ? el("div", { style: `flex:${neu};background:${css("--mid")}` }) : null,
+        bear ? el("div", { style: `flex:${bear};background:${css("--neg")}` }) : null),
+      el("div", { class: "sub", style: "margin-bottom:6px" }, `${bull} bullish · ${neu} neutral · ${bear} bearish`),
+      Object.entries(b).map(([k, v]) => el("div", { class: "ind" }, el("span", {}, NAMES[k] || k),
+        el("span", { class: "bias" }, el("span", { class: "sw", style: `background:${css(v > 0 ? "--pos" : v < 0 ? "--neg" : "--mid")}` }), v > 0 ? "▲ Bullish" : v < 0 ? "▼ Bearish" : "– Neutral")))));
+  }
+}
+
+/* controls */
+function confirmDialog(title, body, okText) {
+  return new Promise(res => {
+    const d = $("#confirm"); $("#cf-title").textContent = title; $("#cf-body").textContent = body; $("#cf-ok").textContent = okText;
+    const done = v => { d.close(); res(v); };
+    $("#cf-ok").onclick = () => done(true); $("#cf-cancel").onclick = () => done(false); d.oncancel = () => res(false);
+    d.showModal();
+  });
+}
+async function command(cmd, btn) {
+  const old = btn.textContent; btn.disabled = true; btn.replaceChildren(el("span", { class: "spin" }), " Sending…");
+  try { const r = await api("api/command", { method: "POST", body: JSON.stringify({ cmd }) }); toast(r.reply); }
+  catch (e) { toast("⚠ " + e.message); }
+  finally { btn.textContent = old; btn.disabled = false; loadLive(); }
+}
+$("#btn-pause").onclick = e => command("/pause", e.currentTarget);
+$("#btn-resume").onclick = e => command("/resume", e.currentTarget);
+$("#btn-squareoff").onclick = async e => { const b = e.currentTarget; if (await confirmDialog("Square off all positions?", "Every open position will be closed at market price now. The bot keeps trading afterwards.", "Square off")) command("/squareoff", b); };
+$("#btn-stop").onclick = async e => { const b = e.currentTarget; if (await confirmDialog("Stop trading for today?", "All open positions are closed at market price and no new trades are taken until tomorrow.", "Stop for today")) command("/stop", b); };
+
+/* ============================================================ trades */
+let trades = [], trDays = 30, trSort = { key: "closed_at", dir: -1 };
+async function loadTrades() {
+  const host = $("#view-trades"); host.classList.add("loading");
+  try { trades = (await api("api/trades")).trades || []; } catch (e) { toast("⚠ " + e.message); }
+  host.classList.remove("loading"); renderTrades();
+}
+$$("#tr-range button").forEach(b => b.onclick = () => { trDays = +b.dataset.days; $$("#tr-range button").forEach(x => x.setAttribute("aria-pressed", x === b)); renderTrades(); });
+$("#tr-mode").onchange = renderTrades; $("#tr-search").oninput = renderTrades;
+function filteredTrades() {
+  const mode = $("#tr-mode").value, q = $("#tr-search").value.trim().toLowerCase();
+  const since = trDays ? istDay(new Date(Date.now() - (trDays - 1) * 864e5)) : null;
+  return trades.filter(t => (!mode || t.mode === mode) && (!q || (t.symbol + " " + (t.strategy || "")).toLowerCase().includes(q)) && (!since || String(t.closed_at || t.date).slice(0, 10) >= since));
+}
+function renderTrades() {
+  const rows = filteredTrades();
+  const net = rows.reduce((a, t) => a + (+t.net_pnl || 0), 0), charges = rows.reduce((a, t) => a + (+t.charges || 0), 0);
+  const wins = rows.filter(t => t.net_pnl > 0), losses = rows.filter(t => t.net_pnl <= 0);
+  const gw = wins.reduce((a, t) => a + t.net_pnl, 0), gl = -losses.reduce((a, t) => a + t.net_pnl, 0);
+  $("#tr-tiles").replaceChildren(
+    tile("Net P&L", signed(net), "after charges", pnlClass(net)),
+    tile("Trades", String(rows.length), rows.length ? `${wins.length} won · ${losses.length} lost` : ""),
+    tile("Win rate", rows.length ? Math.round(wins.length / rows.length * 100) + "%" : "—"),
+    tile("Profit factor", gl ? (gw / gl).toFixed(2) : gw ? "∞" : "—", "gross win ÷ gross loss"),
+    tile("Avg win", wins.length ? money(gw / wins.length) : "—", losses.length ? `avg loss ${money(-gl / losses.length)}` : ""),
+    tile("Charges paid", money(charges), "brokerage + taxes (est.)"));
+  // daily bars & cumulative
+  const byDay = new Map(); for (const t of rows) { const d = (t.closed_at || t.date || "").slice(0, 10); byDay.set(d, (byDay.get(d) || 0) + (+t.net_pnl || 0)); }
+  const days = [...byDay.keys()].sort();
+  barChart($("#tr-daily"), days.map(d => ({ label: fmtDate(d) + " " + d.slice(0, 4), short: fmtDate(d), value: Math.round(byDay.get(d) * 100) / 100, tip: rows.filter(t => (t.closed_at || t.date || "").startsWith(d)).length + " trades" })), { emptyText: "No trades in this range" });
+  let eq = 0; const cum = [...rows].sort((a, b) => new Date(a.closed_at) - new Date(b.closed_at)).map(t => [t.closed_at, Math.round((eq += +t.net_pnl || 0) * 100) / 100]);
+  lineChart($("#tr-cum"), [{ name: "Cumulative net P&L", color: "--s1", points: cum, step: true }], { xFmt: d => fmtDate(d), emptyText: "No trades in this range" });
+  // by symbol
+  const sym = new Map(); for (const t of rows) { const s = sym.get(t.symbol) || { symbol: t.symbol, n: 0, w: 0, net: 0 }; s.n++; if (t.net_pnl > 0) s.w++; s.net += +t.net_pnl || 0; sym.set(t.symbol, s); }
+  $("#tr-bysym").replaceChildren(table([
+    { label: "Instrument", key: "symbol" }, { label: "Trades", key: "n", r: true },
+    { label: "Win %", r: true, render: s => Math.round(s.w / s.n * 100) + "%" },
+    { label: "Net P&L", r: true, render: s => signed(s.net), cls: s => pnlClass(s.net) }],
+    [...sym.values()].sort((a, b) => b.net - a.net).slice(0, 15), { empty: "No trades in this range" }));
+  const rs = new Map(); for (const t of rows) { const k = (t.reason || "").replace(/^opposite signal.*/, "opposite signal"); const r = rs.get(k) || { reason: k, n: 0, net: 0 }; r.n++; r.net += +t.net_pnl || 0; rs.set(k, r); }
+  $("#tr-reasons").replaceChildren(table([
+    { label: "Exit reason", key: "reason" }, { label: "Trades", key: "n", r: true },
+    { label: "Net P&L", r: true, render: r => signed(r.net), cls: r => pnlClass(r.net) }],
+    [...rs.values()].sort((a, b) => b.n - a.n), { empty: "No trades in this range" }));
+  // table
+  const sorted = [...rows].sort((a, b) => { const k = trSort.key, va = a[k], vb = b[k]; return (typeof va === "number" ? va - vb : String(va).localeCompare(String(vb))) * trSort.dir; });
+  $("#tr-count").textContent = rows.length > 500 ? `showing 500 of ${rows.length}` : `${rows.length} trades`;
+  $("#tr-table").replaceChildren(table([
+    { label: "Closed", key: "closed_at", render: t => fmtDateTime(t.closed_at) },
+    { label: "Symbol", key: "symbol" }, { label: "Side", key: "side" }, { label: "Qty", key: "qty", r: true },
+    { label: "Entry", key: "entry", r: true, render: t => price(t.entry) }, { label: "Exit", key: "exit", r: true, render: t => price(t.exit) },
+    { label: "Gross", key: "pnl", r: true, render: t => signed(t.pnl, 2), cls: t => pnlClass(t.pnl) },
+    { label: "Charges", key: "charges", r: true, render: t => money(t.charges, 2) },
+    { label: "Net", key: "net_pnl", r: true, render: t => signed(t.net_pnl, 2), cls: t => pnlClass(t.net_pnl) },
+    { label: "Reason", key: "reason" }, { label: "Mode", key: "mode" }, { label: "Strategy", key: "strategy" }],
+    sorted.slice(0, 500), { empty: trades.length ? "No trades match these filters" : "No trades yet. Closed trades are recorded in logs/trades.csv.", sortable: true,
+      onSort: k => { trSort = { key: k, dir: trSort.key === k ? -trSort.dir : -1 }; renderTrades(); } }));
+}
+
+/* ============================================================ backtest */
+const SIGNAL_LIST = ["ema", "supertrend", "rsi", "vwap", "orb"];
+$("#bt-signals").replaceChildren(...SIGNAL_LIST.map(s => el("label", { class: "check" }, el("input", { type: "checkbox", value: s, checked: true }), s)));
+let btTimer = null, btLast = null;
+$("#bt-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const signals = $$("#bt-signals input:checked").map(i => i.value).concat($("#bt-combos").value.split(/\n+/).map(s => s.replace(/\s+/g, "")).filter(Boolean));
+  try { const r = await api("api/backtest", { method: "POST", body: JSON.stringify({ days: +$("#bt-days").value, signals }) }); if (!r.ok) throw new Error(r.error); pollBacktest(); }
+  catch (err) { toast("⚠ " + err.message); }
+});
+async function pollBacktest() {
+  clearTimeout(btTimer);
+  let s; try { s = await api("api/backtest"); } catch (e) { return; }
+  const status = $("#bt-status"), run = $("#bt-run");
+  run.disabled = s.status === "running";
+  if (s.status === "running") { status.replaceChildren(el("span", { class: "spin" }), ` Downloading history and simulating ${s.signals.length} signal(s) over ${s.days} days…`); $("#bt-results").classList.add("loading"); btTimer = setTimeout(pollBacktest, 2000); return; }
+  $("#bt-results").classList.remove("loading");
+  if (s.status === "error") { status.textContent = "⚠ " + s.error; return; }
+  if (s.status === "done") { status.textContent = `Finished ${fmtDateTime(s.finished)} · last ${s.days} days`; btLast = s; renderBacktest(); }
+  else status.textContent = "";
+}
+function renderBacktest() {
+  const s = btLast; if (!s) return;
+  const note = $("#bt-note"); note.replaceChildren();
+  note.append(el("div", { class: "notice", style: "margin-top:12px" }, el("div", {}, s.estimate
+    ? "Options results are estimates: trades are simulated on the index and P&L ≈ index points × delta × lot size, after estimated charges and slippage. Use them to compare signals, not to predict profit."
+    : "Net P&L includes estimated brokerage, taxes and slippage. Past results don't guarantee future returns.")));
+  const res = [...s.results].sort((a, b) => b.net - a.net), best = res[0];
+  const host = $("#bt-results"); host.replaceChildren();
+  if (best) host.append(el("div", { class: "grid tiles" },
+    tile("Best signal", best.signal, `${signed(best.net)} net`, ""),
+    tile("Best win rate", Math.max(...res.map(r => r.win_rate)) + "%", res.find(r => r.win_rate === Math.max(...res.map(x => x.win_rate))).signal),
+    tile("Lowest drawdown", money(Math.min(...res.map(r => r.max_dd))), res.find(r => r.max_dd === Math.min(...res.map(x => x.max_dd))).signal),
+    tile("Signals tested", String(res.length), `${res.reduce((a, r) => a + r.trades, 0)} simulated trades`)));
+  const curveCard = el("div", { class: "card", style: "margin-bottom:12px" }, el("div", { class: "card-head" }, el("h3", {}, "Equity curves"), el("span", { class: "sub" }, "cumulative net P&L per signal")), el("div", { class: "chart" }));
+  host.append(curveCard);
+  const shown = s.results.slice(0, SERIES.length);   // fixed colour per signal in request order
+  lineChart($(".chart", curveCard), shown.map((r, i) => ({ name: r.signal, color: SERIES[i], points: r.curve, step: true })), { height: 280, xFmt: d => fmtDate(d), directLabels: shown.length <= 4, emptyText: "No trades were generated" });
+  if (s.results.length > SERIES.length) curveCard.append(el("p", { class: "sub" }, `Showing the first ${SERIES.length} signals; all results are in the table.`));
+  host.append(el("div", { class: "card" }, el("div", { class: "card-head" }, el("h3", {}, "Results")), el("div", { class: "table-wrap" }, table([
+    { label: "Signal", render: r => { const i = s.results.indexOf(r); return el("span", { class: "bias" }, i < SERIES.length ? el("span", { class: "sw", style: `background:${css(SERIES[i])};border-radius:1px;height:2px;width:14px` }) : null, r.signal); } },
+    { label: "Trades", key: "trades", r: true }, { label: "Win %", r: true, render: r => r.win_rate + "%" },
+    { label: "Gross", r: true, render: r => signed(r.gross), cls: r => pnlClass(r.gross) },
+    { label: "Costs", r: true, render: r => money(r.costs) },
+    { label: "Net P&L", r: true, render: r => signed(r.net), cls: r => pnlClass(r.net) },
+    { label: "Profit factor", r: true, render: r => r.profit_factor == null ? "∞" : r.profit_factor.toFixed(2) },
+    { label: "Max drawdown", r: true, render: r => money(r.max_dd) }], res))));
+}
+
+/* ============================================================ logs */
+let lgLevel = "";
+const LEVELS = { DEBUG: 10, INFO: 20, WARNING: 30, ERROR: 40, CRITICAL: 50 };
+$$("#lg-level button").forEach(b => b.onclick = () => { lgLevel = b.dataset.level; $$("#lg-level button").forEach(x => x.setAttribute("aria-pressed", x === b)); loadLogs(); });
+$("#lg-search").oninput = () => loadLogs(true); $("#lg-lines").onchange = () => loadLogs();
+let logCache = [];
+async function loadLogs(cached = false) {
+  if (!cached) { try { logCache = (await api("api/logs?lines=" + $("#lg-lines").value)).lines || []; } catch (e) { logCache = ["⚠ " + e.message]; } }
+  const q = $("#lg-search").value.trim().toLowerCase(), min = LEVELS[lgLevel] || 0, pre = $("#lg-pre");
+  const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+  const frag = document.createDocumentFragment();
+  let n = 0;
+  for (const line of logCache) {
+    const lv = (line.match(/\b(DEBUG|INFO|WARNING|ERROR|CRITICAL)\b/) || [])[1];
+    if (min && (!lv || LEVELS[lv] < min)) continue;
+    if (q && !line.toLowerCase().includes(q)) continue;
+    frag.append(el("span", { class: lv || "" }, line + "\n")); n++;
+  }
+  pre.replaceChildren(n ? frag : el("span", { class: "muted" }, logCache.length ? "No lines match." : "Log file is empty (logs/bot.log)."));
+  if (atBottom || !cached) pre.scrollTop = pre.scrollHeight;
+}
+
+/* ============================================================ settings */
+let cfgView = null;
+const GROUPS = [
+  ["Account & mode", ["client_id", "mode", "access_token", "pin", "totp_secret"]],
+  ["Signal", ["signal", "candle_interval", "fast_ema", "slow_ema", "st_period", "st_mult", "rsi_period", "rsi_buy", "rsi_sell", "orb_minutes"]],
+  ["Risk", ["capital_per_trade", "max_trades_per_day", "max_daily_loss", "max_open_positions", "max_risk_per_trade", "daily_profit_target", "max_consecutive_losses", "cooldown_after_loss_min"]],
+  ["Session (IST)", ["entry_start", "entry_end", "square_off", "poll_seconds"]],
+  ["Equity", ["instruments", "stop_loss_pct", "target_pct", "allow_short", "trail_trigger_pct", "trail_pct", "slippage_pct"]],
+  ["Alerts", ["telegram_token", "telegram_chat_id", "telegram_commands"]],
+];
+async function loadConfig() { try { cfgView = await api("api/config"); } catch (e) { return; } renderHeader(); if (view === "settings") renderSettings(); $("#bt-kind").textContent = cfgView.strategy === "options" ? "Options mode (estimated P&L)" : "Equity mode"; $("#ov-poll").textContent = cfgView.config.poll_seconds; }
+function fmtVal(v) { if (v === true) return "yes"; if (v === false) return "no"; if (v === "" || v == null) return "—"; if (Array.isArray(v)) return v.map(x => typeof x === "object" ? (x.symbol || x.name) + (x.security_id ? ` (${x.security_id})` : "") + (x.lot_size ? ` · lot ${x.lot_size}` : "") : x).join(", "); return String(v); }
+function renderSettings() {
+  if (!cfgView) return; const c = cfgView.config, host = $("#st-groups"); host.replaceChildren();
+  const used = new Set();
+  const card = (title, entries) => el("div", { class: "card" }, el("div", { class: "card-head" }, el("h3", {}, title)), el("dl", { class: "kv" }, entries.map(([k, v]) => [el("dt", {}, k), el("dd", {}, fmtVal(v))])));
+  for (const [title, keys] of GROUPS) { const e = keys.filter(k => k in c).map(k => (used.add(k), [k, c[k]])); if (e.length) host.append(card(title, e)); }
+  if (cfgView.options) host.append(card("Options", Object.entries(cfgView.options)));
+  const rest = Object.entries(c).filter(([k]) => !used.has(k)); if (rest.length) host.append(card("Other", rest));
+}
+
+/* ============================================================ refresh loop */
+function refresh() {
+  if (view === "overview" || view === "market") loadLive();
+  if (view === "trades") loadTrades();
+  if (view === "logs") loadLogs();
+  if (view === "settings") renderSettings();
+  if (view === "backtest") pollBacktest();
+}
+function rerender() { if (view === "overview") renderOverview(); if (view === "market") renderMarket(); if (view === "trades") renderTrades(); if (view === "backtest") renderBacktest(); }
+setInterval(() => { if (document.hidden) return; if (view === "overview" || view === "market") loadLive(); else renderHeader(); }, 3000);
+setInterval(() => { if (!document.hidden && view === "logs" && $("#lg-auto").checked) loadLogs(); }, 5000);
+setInterval(() => { if (!document.hidden && view === "trades") loadTrades(); }, 30000);
+setInterval(() => { if (!document.hidden && view !== "overview" && view !== "market") api("api/live").then(d => { live = d; renderHeader(); }).catch(() => {}); }, 10000);
+let rz; new ResizeObserver(() => { clearTimeout(rz); rz = setTimeout(rerender, 150); }).observe(document.querySelector("main"));
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", rerender);
+loadConfig(); route();
+</script>
+</body>
+</html>

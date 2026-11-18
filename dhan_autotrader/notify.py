@@ -87,7 +87,8 @@ class TelegramCommands:
 
     API = "https://api.telegram.org/bot{token}/getUpdates"
 
-    def __init__(self, token: str, chat_id: str, get=None, poll_timeout: int = 25):
+    def __init__(self, token: str, chat_id: str, get=None, poll_timeout: int = 25, hub=None):
+        self.hub = hub  # when set, commands go to the shared CommandHub instead of the local queue
         self.url = self.API.format(token=token)
         self.chat_id, self.poll_timeout = str(chat_id), poll_timeout
         self._get = get or self._http_get
@@ -120,7 +121,11 @@ class TelegramCommands:
                         continue
                     text = (msg.get("text") or "").strip()
                     if text.startswith("/"):
-                        self._q.put(text.split()[0].split("@")[0].lower())
+                        name = text.split()[0].split("@")[0].lower()
+                        if self.hub is not None:
+                            self.hub.submit(name, "telegram")
+                        else:
+                            self._q.put(name)
                 first = False
             except Exception as exc:
                 log.warning("Telegram command poll failed: %s", exc)
@@ -136,7 +141,7 @@ class TelegramCommands:
         self._stop.set()
 
 
-def build_commands(cfg):
+def build_commands(cfg, hub=None):
     if cfg.telegram_token and cfg.telegram_chat_id and getattr(cfg, "telegram_commands", True):
-        return TelegramCommands(cfg.telegram_token, cfg.telegram_chat_id)
+        return TelegramCommands(cfg.telegram_token, cfg.telegram_chat_id, hub=hub)
     return None

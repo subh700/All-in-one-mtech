@@ -14,6 +14,7 @@ from .broker import IST, BrokerError, DhanBroker, PaperBroker
 from .bot import TradingBot
 from .config import Config
 from .journal import StateStore, TradeJournal
+from .live import LIVE
 from .login import get_access_token
 from .notify import build_commands, build_notifier
 from .options import OptionSettings, OptionsRunner
@@ -42,7 +43,7 @@ def trade_one_day(cfg: Config, opt: OptionSettings | None, broker=None) -> bool:
     broker = broker or connect(cfg)
     strategy = build_strategy(cfg)
     notifier = build_notifier(cfg)
-    commands = build_commands(cfg)
+    telegram = build_commands(cfg, hub=LIVE.hub)  # Telegram + dashboard commands share one queue
     kind = "options" if opt else "equity"
     journal = TradeJournal("logs/trades.csv", mode=cfg.mode, strategy=f"{kind}:{strategy.name}")
     store = StateStore(f"state/{kind}_{cfg.mode}.json")
@@ -50,7 +51,11 @@ def trade_one_day(cfg: Config, opt: OptionSettings | None, broker=None) -> bool:
         bot = OptionsRunner(cfg, opt, broker, strategy, notifier=notifier, journal=journal, store=store)
     else:
         bot = TradingBot(cfg, broker, strategy, notifier=notifier, journal=journal, store=store)
-    return bot.run(commands=commands)
+    try:
+        return bot.run(commands=LIVE.hub)
+    finally:
+        if telegram is not None:
+            telegram.close()
 
 
 def next_wake(now: datetime) -> datetime:
@@ -105,6 +110,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--bt-delta", type=float, default=0.4, help="options backtest: assumed option delta (default 0.4)")
     p.add_argument("--daemon", action="store_true",
                    help="run forever: trade every weekday 09:10-square-off with a fresh login each day")
+    p.add_argument("--dashboard", action="store_true",
+                   help="also serve the web dashboard (http://127.0.0.1:8050 by default; see DASHBOARD_* in .env)")
+    p.add_argument("--dashboard-only", action="store_true",
+                   help="serve the dashboard without trading (journal, backtests, logs, settings)")
     p.add_argument("--check", action="store_true", help="only verify the Dhan connection and exit")
     p.add_argument("--confirm-live", action="store_true", help="required to place REAL orders when TRADING_MODE=live")
     p.add_argument("-v", "--verbose", action="store_true")
@@ -140,9 +149,33 @@ def main(argv: list[str] | None = None) -> int:
         log.error("--signal all is only valid with --backtest")
         return 2
 
-    if cfg.is_live and not args.confirm_live and not args.backtest and not args.check:
+    if cfg.is_live and not args.confirm_live and not (args.backtest or args.check or args.dashboard_only):
         log.error("TRADING_MODE=live requires --confirm-live. Real money will be used.")
         return 2
+
+    dashboard = None
+    if args.dashboard or args.dashboard_only:
+        from .dashboard import start_dashboard
+
+        def broker_factory():
+            return connect(cfg)
+
+        try:
+            dashboard = start_dashboard(cfg, opt, broker_factory)
+        except (OSError, ValueError) as exc:
+            log.error("Dashboard could not start: %s", exc)
+            if args.dashboard_only:
+                return 2
+            log.warning("Continuing to trade without the dashboard")
+
+    if args.dashboard_only:
+        log.info("Dashboard-only mode — Ctrl+C to quit")
+        try:
+            while True:
+                _time.sleep(3600)
+        except KeyboardInterrupt:
+            dashboard.stop()
+        return 0
 
     if args.daemon:
         if args.backtest or args.check:
@@ -177,6 +210,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     trade_one_day(cfg, opt, broker)
+    if dashboard is not None:
+        log.info("Session over — dashboard stays up for review. Ctrl+C to quit.")
+        try:
+            while True:
+                _time.sleep(3600)
+        except KeyboardInterrupt:
+            dashboard.stop()
     return 0
 
 
