@@ -13,7 +13,10 @@ An intraday auto-trading bot for **Dhan** (DhanHQ API v2), built on the official
 - **Backtesting** on Dhan's historical candles, including a side-by-side comparison of every signal.
 - **Automatic daily login** with your PIN and TOTP, so you don't have to paste a token every day.
 - **Trade journal** (`logs/trades.csv`) and **crash recovery:** a restart during the day resumes open positions.
-- **Telegram alerts** for every entry, exit, trailing-stop activation and error, plus a daily P&L summary.
+- **Telegram alerts and remote control:** `/status`, `/pnl`, `/pause`, `/resume`, `/squareoff` and `/stop` from your phone.
+- **Extra risk guards:** a cap on ₹ risk per trade, a daily profit target, a cooldown after a loss, and a halt after N losses in a row.
+- **Real costs:** brokerage, STT, exchange fees, GST and stamp duty in the backtest, the journal and the exit alerts.
+- **Runs unattended:** `--daemon` mode, plus Docker and systemd files for a VPS.
 - **Paper mode by default.** It uses real Dhan market data and simulates the fills. Live orders need `TRADING_MODE=live` **and** the `--confirm-live` flag.
 
 ## 1. Get Dhan API access
@@ -59,12 +62,35 @@ Run it for a few days in paper mode and read `logs/bot.log` (or your Telegram al
 python -m dhan_autotrader --strategy options --confirm-live
 ```
 
-The bot stops on its own after square-off time and on weekends. Pressing `Ctrl+C` squares off any open positions first.
-To run it every trading day on a VPS, add a cron job (09:20 IST, Monday to Friday):
+A normal run stops on its own after square-off time and on weekends. Pressing `Ctrl+C` (or stopping the service) squares off any open positions first.
 
+## Run it unattended (daemon, Docker, systemd)
+
+`--daemon` keeps the bot running permanently:
+1. It wakes at **09:10 IST** on weekdays.
+2. It **logs in fresh** with your PIN and TOTP.
+3. It trades until square-off, sends the day summary, then sleeps until the next weekday.
+4. If it crashes, it restarts in 60 seconds and **restores open positions**. If login fails, it retries every 5 minutes.
+
+```bash
+python -m dhan_autotrader --strategy options --daemon                    # paper
+python -m dhan_autotrader --strategy options --daemon --confirm-live     # live
 ```
-20 9 * * 1-5 cd /path/to/All-in-one-mtech && .venv/bin/python -m dhan_autotrader --confirm-live >> logs/cron.log 2>&1
+
+**Docker** (simplest on a VPS):
+```bash
+docker compose up -d --build
+docker compose logs -f
 ```
+- `logs/` and `state/` are mounted so trades and crash-recovery state persist.
+- `docker compose stop` squares off positions first.
+- For live trading, change `command:` in `docker-compose.yml` to `["--daemon", "--confirm-live"]`.
+
+**systemd:** see `deploy/dhan-autotrader.service` (it restarts on failure and squares off on stop).
+
+Logs rotate daily (`logs/bot.log`), and 30 days are kept.
+
+> Use a VPS whose **static IP is registered with Dhan**. Automatic login with PIN + TOTP is strongly recommended for daemon mode.
 
 ## Entry signals (`SIGNAL=`)
 
@@ -194,6 +220,37 @@ For stocks, use `TRAIL_TRIGGER_PCT` / `TRAIL_PCT` (off by default).
 - **Live mode:** each restored position is checked against your Dhan positions. If it's already closed it's dropped, and if the quantity differs Dhan's quantity is used.
 - Saved state from a previous day is ignored.
 
+## Extra risk guards
+
+| Variable | Default | What it does |
+|---|---|---|
+| `MAX_RISK_PER_TRADE` | 0 (off) | ₹ you can lose if the stop-loss is hit. Qty or lots are **reduced** to fit, for example premium 120 × SL 25% × 65 = ₹1,950 per NIFTY lot, so ₹4,000 allows 2 lots. |
+| `DAILY_PROFIT_TARGET` | 0 (off) | When realized profit reaches this, the bot **books all positions and stops for the day**. |
+| `MAX_CONSECUTIVE_LOSSES` | 0 (off) | Stops for the day after N losing trades in a row. |
+| `COOLDOWN_AFTER_LOSS_MIN` | 0 (off) | No new entries for N minutes after a loss, to avoid revenge trades in choppy markets. |
+
+Every halt sends a Telegram message (🛑) saying why.
+
+## Charges
+
+The bot estimates **Dhan intraday charges** per trade (`dhan_autotrader/costs.py`):
+
+| | Stocks (intraday) | Options |
+|---|---|---|
+| Brokerage | ₹20 or 0.03% per order, whichever is lower | ₹20 per order |
+| STT | 0.025% of the sell value | 0.1% of the sell premium |
+| Exchange fee | 0.00297% | 0.03503% of premium (BSE 0.0325%) |
+| GST | 18% on brokerage + exchange fee + SEBI fee | same |
+| Stamp duty and SEBI fee | 0.003% of buy value, ₹10 per crore | same |
+
+For example, one NIFTY lot bought at 120 and sold at 150 costs about **₹64**.
+- Exit alerts show `net ≈ ₹…` after charges.
+- `logs/trades.csv` has `charges` and `net_pnl` columns.
+- The **backtest** reports gross P&L, costs and net P&L, and also subtracts `SLIPPAGE_PCT` (0.05%) per fill.
+- Daily risk limits use gross P&L.
+
+> Rates change. Compare them with Dhan's charges page and edit `costs.py` if needed.
+
 ## Telegram alerts
 
 1. In Telegram, message **@BotFather**, send `/newbot`, and copy the **token**.
@@ -214,6 +271,24 @@ You get these messages, each tagged `[PAPER]` or `[LIVE]`:
 - 📊 end-of-day summary
 
 Alerts are sent in the background, so a slow or failed send never delays an order.
+
+### Remote control from Telegram
+
+Send these commands to your bot (only messages from `TELEGRAM_CHAT_ID` are accepted):
+
+| Command | What it does |
+|---|---|
+| `/status` | mode, running/paused/halted, trades today, realized P&L, each open position with LTP, P&L and SL |
+| `/pnl` | realized + open P&L |
+| `/pause` | no new entries; open positions keep their SL, target and trailing stop |
+| `/resume` | allow entries again |
+| `/squareoff` | close all positions now (keeps trading) |
+| `/stop` | close all positions and stop trading for today |
+| `/help` | list of commands |
+
+Commands run between bot cycles, so they never interrupt an order in progress, and they're answered within a few seconds.
+Commands you send while the bot is offline are ignored, so an old `/stop` can't fire the next morning.
+Set `TELEGRAM_COMMANDS=false` to turn this off and keep alerts only.
 
 ## Shared and stock settings
 
@@ -243,8 +318,10 @@ dhan_autotrader/
   backtest.py  historical simulation + signal comparison
   journal.py   trade journal CSV + same-day state persistence
   login.py     automatic PIN + TOTP login with daily token cache
-  notify.py    Telegram alerts
+  notify.py    Telegram alerts + remote commands
+  costs.py     brokerage / STT / GST / stamp duty estimates
 tests/         unit tests using a fake Dhan client (pytest)
+Dockerfile, docker-compose.yml, deploy/   unattended deployment
 ```
 
 ## Disclaimer

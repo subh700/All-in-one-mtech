@@ -76,3 +76,67 @@ def build_notifier(cfg) -> Notifier:
         return TelegramNotifier(cfg.telegram_token, cfg.telegram_chat_id,
                                 prefix="[LIVE] " if cfg.is_live else "[PAPER] ")
     return Notifier()
+
+
+class TelegramCommands:
+    """Long-polls Telegram for commands sent from YOUR chat only and queues them.
+
+    The trading loop picks commands off the queue between ticks, so a command never
+    runs concurrently with order logic.
+    """
+
+    API = "https://api.telegram.org/bot{token}/getUpdates"
+
+    def __init__(self, token: str, chat_id: str, get=None, poll_timeout: int = 25):
+        self.url = self.API.format(token=token)
+        self.chat_id, self.poll_timeout = str(chat_id), poll_timeout
+        self._get = get or self._http_get
+        self._offset: int | None = None
+        self._q: queue.Queue = queue.Queue()
+        self._stop = threading.Event()
+        self._t = threading.Thread(target=self._worker, name="telegram-commands", daemon=True)
+        self._t.start()
+
+    def _http_get(self, params: dict) -> dict:
+        url = f"{self.url}?{urllib.parse.urlencode(params)}"
+        with urllib.request.urlopen(url, timeout=params.get("timeout", 0) + 10) as r:
+            return json.loads(r.read() or b"{}")
+
+    def _worker(self) -> None:
+        first = True  # skip commands sent while the bot was not running
+        while not self._stop.is_set():
+            try:
+                params = {"timeout": 0 if first else self.poll_timeout, "allowed_updates": '["message"]'}
+                if self._offset is not None:
+                    params["offset"] = self._offset
+                data = self._get(params)
+                for upd in data.get("result", []):
+                    self._offset = upd["update_id"] + 1
+                    if first:
+                        continue
+                    msg = upd.get("message") or {}
+                    if str((msg.get("chat") or {}).get("id")) != self.chat_id:
+                        log.warning("Ignoring Telegram message from unknown chat %s", (msg.get("chat") or {}).get("id"))
+                        continue
+                    text = (msg.get("text") or "").strip()
+                    if text.startswith("/"):
+                        self._q.put(text.split()[0].split("@")[0].lower())
+                first = False
+            except Exception as exc:
+                log.warning("Telegram command poll failed: %s", exc)
+                self._stop.wait(5)
+
+    def get(self, timeout: float) -> str | None:
+        try:
+            return self._q.get(timeout=max(0.0, timeout))
+        except queue.Empty:
+            return None
+
+    def close(self) -> None:
+        self._stop.set()
+
+
+def build_commands(cfg):
+    if cfg.telegram_token and cfg.telegram_chat_id and getattr(cfg, "telegram_commands", True):
+        return TelegramCommands(cfg.telegram_token, cfg.telegram_chat_id)
+    return None

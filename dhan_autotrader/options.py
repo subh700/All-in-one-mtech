@@ -21,6 +21,7 @@ from datetime import date, datetime
 
 from .broker import IST, BrokerError, DhanBroker, _unwrap
 from .config import Config, Instrument, _bool
+from .costs import trade_charges
 from .journal import (NullJournal, NullStore, StateStore, TradeJournal, position_from_dict, position_to_dict,
                       risk_from_dict, risk_to_dict)
 from .notify import Notifier
@@ -244,7 +245,7 @@ class IndexOptionsBot:
 
         if self.risk.halted:
             if self.position:
-                self._close("daily loss limit")
+                self._close(self.risk.halt_reason)
             return
         if not self.risk.in_entry_window(now.time()):
             return
@@ -269,7 +270,7 @@ class IndexOptionsBot:
         reason = op.pos.exit_reason(ltp)
         if not reason and self.risk.realized_pnl + op.pos.pnl(ltp) <= -abs(self.cfg.max_daily_loss):
             reason = "daily loss limit"
-            self.risk.halted = True
+            self.risk.halt("daily loss limit")
         if reason:
             self._close(reason)
 
@@ -291,18 +292,19 @@ class IndexOptionsBot:
         self._open(kind, now.date())
 
     def _open(self, kind: str, today: date) -> None:
-        ok, why = self.risk.can_open(self.open_count())
+        ok, why = self.risk.can_open(self.open_count(), now=self.clock())
         if not ok:
             log.info("Skip %s %s entry: %s", self.spec.name, kind, why)
             return
         contract = self.chain.select(kind, today)
         premium = self.broker.ltp(contract.inst) or contract.ltp
         lots = self.lots_for(premium)
+        qty = self.risk.cap_for_risk(lots * self.spec.lot_size, premium * self.s.sl_pct / 100, self.spec.lot_size)
+        lots = qty // self.spec.lot_size
         if lots < 1:
-            log.info("Skip %s: 1 lot costs %.0f > CAPITAL_PER_TRADE %.0f",
-                     contract.inst.symbol, premium * self.spec.lot_size, self.cfg.capital_per_trade)
+            log.info("Skip %s: 1 lot (premium %.2f x %d) exceeds CAPITAL_PER_TRADE ₹%.0f or MAX_RISK_PER_TRADE",
+                     contract.inst.symbol, premium, self.spec.lot_size, self.cfg.capital_per_trade)
             return
-        qty = lots * self.spec.lot_size
         fill = self.broker.market_order(contract.inst, "BUY", qty, tag=f"bot-{self.spec.name}-open")
         stop, target = self.brackets(fill.price)
         self.position = OptionPosition(contract, Position(contract.inst.symbol, "BUY", qty, fill.price,
@@ -321,15 +323,14 @@ class IndexOptionsBot:
         fill = self.broker.market_order(op.contract.inst, "SELL", op.pos.qty, tag=f"bot-{self.spec.name}-close")
         pnl = op.pos.pnl(fill.price)
         self.position = None
-        self.risk.record_exit(pnl)
-        self.journal.record(op.pos, fill.price, pnl, reason, self.clock())
+        self.risk.record_exit(pnl, now=self.clock())
+        charges = trade_charges(op.contract.inst.exchange_segment, "BUY", op.pos.entry, fill.price, op.pos.qty)
+        self.journal.record(op.pos, fill.price, pnl, reason, self.clock(), charges=charges)
         self.on_change()
         msg = (f"{op.contract.inst.symbol} x{op.pos.qty} @ {fill.price:.2f} ({reason}) "
-               f"P&L ₹{pnl:,.2f} | day ₹{self.risk.realized_pnl:,.2f}")
+               f"P&L ₹{pnl:,.2f} (net ≈ ₹{pnl - charges:,.2f}) | day ₹{self.risk.realized_pnl:,.2f}")
         log.info("CLOSE %s", msg)
         self.notifier.send(f"{'✅' if pnl >= 0 else '🔴'} CLOSE {msg}")
-        if self.risk.halted:
-            self.notifier.send("🛑 Daily loss limit hit — no more entries today", key="halted")
 
     def square_off_all(self, reason: str) -> None:
         try:
@@ -352,6 +353,7 @@ class OptionsRunner:
         self.clock = clock or (lambda: datetime.now(IST))
         self.notifier = notifier or Notifier()
         self.risk = RiskManager(cfg)
+        self.risk.on_halt = lambda reason: self.notifier.send(f"🛑 Halted for today: {reason}")
         chains = chains or {}
         self.bots = [
             IndexOptionsBot(cfg, settings, spec, broker, strategy, risk=self.risk, chain=chains.get(spec.name),
@@ -417,7 +419,7 @@ class OptionsRunner:
             except BrokerError:
                 return
             if total <= -abs(self.cfg.max_daily_loss):
-                self.risk.halted = True
+                self.risk.halt("daily loss limit (all indices)")
                 self.square_off_all("daily loss limit (all indices)")
 
     def square_off_all(self, reason: str) -> None:
@@ -425,9 +427,27 @@ class OptionsRunner:
             if bot.position:
                 bot.square_off_all(reason)
 
-    def run(self) -> None:
+    def status_lines(self) -> list[str]:
+        out = []
+        for b in self.bots:
+            if not b.position:
+                continue
+            p = b.position.pos
+            try:
+                ltp = self.broker.ltp(b.position.contract.inst)
+                pnl = f"LTP {ltp:.2f} | P&L ₹{p.pnl(ltp):,.2f}"
+            except BrokerError:
+                pnl = "LTP n/a"
+            out.append(f"{p.symbol} x{p.qty} @ {p.entry:.2f} | {pnl} | SL {p.stop:.2f}"
+                       + (" (trailing)" if p.trailing else ""))
+        return out
+
+    def unrealized_total(self) -> float:
+        return sum(b.unrealized() for b in self.bots)
+
+    def run(self, commands=None) -> bool:
         from .bot import run_session
 
         names = ", ".join(i.name for i in self.s.indices)
-        run_session(self, f"options bot ({self.cfg.mode.upper()}) {names} | signal={self.bots[0].strategy.name} "
-                          f"| OTM offset {self.s.strike_offset:+d} | {self.s.max_lots} lot max")
+        return run_session(self, f"options bot ({self.cfg.mode.upper()}) {names} | signal={self.bots[0].strategy.name} "
+                          f"| OTM offset {self.s.strike_offset:+d} | {self.s.max_lots} lot max", commands=commands)

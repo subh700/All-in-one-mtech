@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 
 from .broker import IST, Candle
+from .costs import round_trip_charges, trade_charges
 from .risk import Position
 from .strategy import Signal, Strategy
 
@@ -39,7 +40,12 @@ class BtTrade:
     exit: float
     reason: str
     qty: float           # units used for P&L
-    pnl: float
+    pnl: float           # gross
+    costs: float = 0.0   # brokerage + taxes + slippage
+
+    @property
+    def net(self) -> float:
+        return self.pnl - self.costs
 
     @property
     def points(self) -> float:
@@ -66,12 +72,20 @@ class BtResult:
     trades: list[BtTrade] = field(default_factory=list)
 
     @property
-    def total(self) -> float:
+    def gross(self) -> float:
         return sum(t.pnl for t in self.trades)
 
     @property
+    def costs(self) -> float:
+        return sum(t.costs for t in self.trades)
+
+    @property
+    def total(self) -> float:
+        return sum(t.net for t in self.trades)
+
+    @property
     def wins(self) -> list[BtTrade]:
-        return [t for t in self.trades if t.pnl > 0]
+        return [t for t in self.trades if t.net > 0]
 
     @property
     def win_rate(self) -> float:
@@ -79,30 +93,31 @@ class BtResult:
 
     @property
     def profit_factor(self) -> float:
-        gross_win = sum(t.pnl for t in self.trades if t.pnl > 0)
-        gross_loss = -sum(t.pnl for t in self.trades if t.pnl < 0)
+        gross_win = sum(t.net for t in self.trades if t.net > 0)
+        gross_loss = -sum(t.net for t in self.trades if t.net < 0)
         return gross_win / gross_loss if gross_loss else (math.inf if gross_win else 0.0)
 
     @property
     def max_drawdown(self) -> float:
         peak = eq = dd = 0.0
         for t in self.trades:
-            eq += t.pnl
+            eq += t.net
             peak = max(peak, eq)
             dd = max(dd, peak - eq)
         return dd
 
     def row(self) -> list:
         pf = self.profit_factor
-        avg_w = sum(t.pnl for t in self.wins) / len(self.wins) if self.wins else 0.0
-        losses = [t for t in self.trades if t.pnl <= 0]
-        avg_l = sum(t.pnl for t in losses) / len(losses) if losses else 0.0
-        return [self.name, len(self.trades), f"{self.win_rate:.0f}%", f"{self.total:,.0f}",
+        avg_w = sum(t.net for t in self.wins) / len(self.wins) if self.wins else 0.0
+        losses = [t for t in self.trades if t.net <= 0]
+        avg_l = sum(t.net for t in losses) / len(losses) if losses else 0.0
+        return [self.name, len(self.trades), f"{self.win_rate:.0f}%", f"{self.gross:,.0f}", f"{self.costs:,.0f}",
+                f"{self.total:,.0f}",
                 f"{avg_w:,.0f}", f"{avg_l:,.0f}", "inf" if math.isinf(pf) else f"{pf:.2f}",
                 f"{self.max_drawdown:,.0f}"]
 
 
-HEADER = ["signal", "trades", "win%", "net P&L", "avg win", "avg loss", "profit factor", "max DD"]
+HEADER = ["signal", "trades", "win%", "gross", "costs", "net P&L", "avg win", "avg loss", "profit factor", "max DD"]
 
 
 def simulate(symbol: str, candles: list[Candle], strategy: Strategy, p: BtParams, qty_fn) -> list[BtTrade]:
@@ -187,12 +202,12 @@ def write_trades(path: str, results: list[BtResult]) -> None:
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["signal", "symbol", "side", "entry_time", "entry", "exit_time", "exit", "points", "qty",
-                    "pnl", "reason"])
+                    "gross_pnl", "costs", "net_pnl", "reason"])
         for r in results:
             for t in r.trades:
                 w.writerow([r.name, t.symbol, t.side, t.entry_ts.isoformat(timespec="minutes"), round(t.entry, 2),
                             t.exit_ts.isoformat(timespec="minutes"), round(t.exit, 2), round(t.points, 2),
-                            round(t.qty, 2), round(t.pnl, 2), t.reason])
+                            round(t.qty, 2), round(t.pnl, 2), round(t.costs, 2), round(t.net, 2), t.reason])
 
 
 def format_table(results: list[BtResult]) -> str:
@@ -246,8 +261,21 @@ def run_backtest(cfg, broker, days: int, signal_names: list[str], option_setting
                 qty_fn = lambda price, lot=lot, lots=lots: delta * lot * lots
             else:
                 qty_fn = lambda price: math.floor(cfg.capital_per_trade / price) if price > 0 else 0
-            trades = simulate(name, candles, strategy, params, qty_fn)
-            res.trades += [t for t in trades if t.entry_ts.date() >= start]
+            trades = [t for t in simulate(name, candles, strategy, params, qty_fn) if t.entry_ts.date() >= start]
+            slip = cfg.slippage_pct / 100
+            for t in trades:
+                if lot:  # options: estimate the premium to price charges + slippage
+                    units = lot * o.max_lots
+                    premium = premium_to_index * delta * t.entry
+                    buy_value = premium * units
+                    sell_value = max(0.0, buy_value + t.pnl)
+                    seg = next(s.fno_segment for s in o.indices if s.name == name)
+                    t.costs = round_trip_charges(seg, buy_value, sell_value) + (buy_value + sell_value) * slip
+                else:
+                    t.costs = (trade_charges(next(i.exchange_segment for i in cfg.instruments if i.symbol == name),
+                                             t.side, t.entry, t.exit, t.qty)
+                               + (t.entry + t.exit) * t.qty * slip)
+            res.trades += trades
         res.trades.sort(key=lambda t: t.entry_ts)
         results.append(res)
     write_trades(out_csv, results)

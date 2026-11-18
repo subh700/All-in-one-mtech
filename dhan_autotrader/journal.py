@@ -12,8 +12,8 @@ from .risk import Position
 
 log = logging.getLogger(__name__)
 
-JOURNAL_FIELDS = ["date", "mode", "strategy", "symbol", "side", "qty", "entry", "exit", "pnl", "reason",
-                  "opened_at", "closed_at"]
+JOURNAL_FIELDS = ["date", "mode", "strategy", "symbol", "side", "qty", "entry", "exit", "pnl", "charges",
+                  "net_pnl", "reason", "opened_at", "closed_at"]
 
 
 class TradeJournal:
@@ -22,9 +22,21 @@ class TradeJournal:
     def __init__(self, path: str = "logs/trades.csv", mode: str = "paper", strategy: str = ""):
         self.path, self.mode, self.strategy = path, mode, strategy
 
-    def record(self, pos: Position, exit_price: float, pnl: float, reason: str, closed_at: datetime) -> None:
+    def _rotate_if_old_format(self) -> None:
+        try:
+            with open(self.path, newline="") as f:
+                header = next(csv.reader(f), [])
+        except OSError:
+            return
+        if header and header != JOURNAL_FIELDS:
+            os.replace(self.path, self.path.replace(".csv", "") + f"_old_{datetime.now():%Y%m%d%H%M%S}.csv")
+
+    def record(self, pos: Position, exit_price: float, pnl: float, reason: str, closed_at: datetime,
+               charges: float = 0.0) -> None:
         try:
             os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+            if os.path.exists(self.path) and os.path.getsize(self.path):
+                self._rotate_if_old_format()
             new = not os.path.exists(self.path) or os.path.getsize(self.path) == 0
             with open(self.path, "a", newline="") as f:
                 w = csv.DictWriter(f, fieldnames=JOURNAL_FIELDS)
@@ -33,7 +45,8 @@ class TradeJournal:
                 w.writerow({
                     "date": closed_at.date().isoformat(), "mode": self.mode, "strategy": self.strategy,
                     "symbol": pos.symbol, "side": pos.side, "qty": pos.qty, "entry": round(pos.entry, 2),
-                    "exit": round(exit_price, 2), "pnl": round(pnl, 2), "reason": reason,
+                    "exit": round(exit_price, 2), "pnl": round(pnl, 2), "charges": round(charges, 2),
+                    "net_pnl": round(pnl - charges, 2), "reason": reason,
                     "opened_at": pos.opened_at.isoformat(timespec="seconds"),
                     "closed_at": closed_at.isoformat(timespec="seconds"),
                 })
@@ -102,7 +115,9 @@ class NullStore(StateStore):
 
 
 def risk_to_dict(risk) -> dict:
-    return {"trades_today": risk.trades_today, "realized_pnl": risk.realized_pnl, "halted": risk.halted}
+    return {"trades_today": risk.trades_today, "realized_pnl": risk.realized_pnl, "halted": risk.halted,
+            "halt_reason": risk.halt_reason, "paused": risk.paused, "consecutive_losses": risk.consecutive_losses,
+            "cooldown_until": risk.cooldown_until.isoformat() if risk.cooldown_until else None}
 
 
 def risk_from_dict(risk, d: dict, today: date) -> None:
@@ -110,3 +125,8 @@ def risk_from_dict(risk, d: dict, today: date) -> None:
     risk.trades_today = int(d.get("trades_today", 0))
     risk.realized_pnl = float(d.get("realized_pnl", 0.0))
     risk.halted = bool(d.get("halted", False))
+    risk.halt_reason = d.get("halt_reason", "") or ("restored" if risk.halted else "")
+    risk.paused = bool(d.get("paused", False))
+    risk.consecutive_losses = int(d.get("consecutive_losses", 0))
+    cu = d.get("cooldown_until")
+    risk.cooldown_until = datetime.fromisoformat(cu) if cu else None

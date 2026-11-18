@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 
 from .config import Config
 
@@ -68,19 +68,45 @@ class Position:
 
 
 class RiskManager:
+    """Daily risk state shared by everything the bot trades."""
+
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.day: date | None = None
         self.trades_today = 0
         self.realized_pnl = 0.0
         self.halted = False
+        self.halt_reason = ""
+        self.paused = False                 # set from Telegram /pause
+        self.consecutive_losses = 0
+        self.cooldown_until: datetime | None = None
+        self.on_halt = None                 # callback(reason) — used for alerts
 
     def roll_day(self, today: date) -> None:
         if self.day != today:
-            self.day, self.trades_today, self.realized_pnl, self.halted = today, 0, 0.0, False
+            self.day, self.trades_today, self.realized_pnl = today, 0, 0.0
+            self.halted, self.halt_reason, self.consecutive_losses, self.cooldown_until = False, "", 0, None
 
+    def halt(self, reason: str) -> bool:
+        """Stop new entries for the rest of the day. Returns True if this call caused the halt."""
+        if self.halted:
+            return False
+        self.halted, self.halt_reason = True, reason
+        if self.on_halt:
+            self.on_halt(reason)
+        return True
+
+    # ---- sizing --------------------------------------------------------
     def quantity(self, price: float) -> int:
         return max(0, math.floor(self.cfg.capital_per_trade / price)) if price > 0 else 0
+
+    def cap_for_risk(self, qty: int, risk_per_unit: float, lot: int = 1) -> int:
+        """Reduce qty (in multiples of `lot`) so qty x risk_per_unit <= MAX_RISK_PER_TRADE."""
+        limit = getattr(self.cfg, "max_risk_per_trade", 0) or 0
+        if limit <= 0 or risk_per_unit <= 0:
+            return qty
+        allowed = math.floor(limit / (risk_per_unit * lot)) * lot
+        return min(qty, max(0, allowed))
 
     def brackets(self, side: str, price: float) -> tuple[float, float]:
         sl, tg = self.cfg.stop_loss_pct / 100, self.cfg.target_pct / 100
@@ -88,18 +114,25 @@ class RiskManager:
             return round(price * (1 - sl), 2), round(price * (1 + tg), 2)
         return round(price * (1 + sl), 2), round(price * (1 - tg), 2)
 
+    # ---- timing --------------------------------------------------------
     def in_entry_window(self, now: time) -> bool:
         return self.cfg.entry_start <= now <= self.cfg.entry_end
 
     def must_square_off(self, now: time) -> bool:
         return now >= self.cfg.square_off
 
-    def can_open(self, open_positions: int, unrealized: float = 0.0) -> tuple[bool, str]:
+    # ---- gates ---------------------------------------------------------
+    def can_open(self, open_positions: int, unrealized: float = 0.0,
+                 now: datetime | None = None) -> tuple[bool, str]:
         if self.halted:
-            return False, "halted: daily loss limit hit"
+            return False, f"halted: {self.halt_reason}"
+        if self.paused:
+            return False, "paused (send /resume to continue)"
         if self.realized_pnl + unrealized <= -abs(self.cfg.max_daily_loss):
-            self.halted = True
+            self.halt("daily loss limit")
             return False, "daily loss limit hit"
+        if self.cooldown_until and now and now < self.cooldown_until:
+            return False, f"cooling down after a loss until {self.cooldown_until:%H:%M}"
         if self.trades_today >= self.cfg.max_trades_per_day:
             return False, "max trades per day reached"
         if open_positions >= self.cfg.max_open_positions:
@@ -109,7 +142,21 @@ class RiskManager:
     def record_entry(self) -> None:
         self.trades_today += 1
 
-    def record_exit(self, pnl: float) -> None:
+    def record_exit(self, pnl: float, now: datetime | None = None) -> None:
         self.realized_pnl += pnl
-        if self.realized_pnl <= -abs(self.cfg.max_daily_loss):
-            self.halted = True
+        cfg = self.cfg
+        if pnl < 0:
+            self.consecutive_losses += 1
+            mins = getattr(cfg, "cooldown_after_loss_min", 0) or 0
+            if mins and now:
+                self.cooldown_until = now + timedelta(minutes=mins)
+        else:
+            self.consecutive_losses = 0
+        if self.realized_pnl <= -abs(cfg.max_daily_loss):
+            self.halt("daily loss limit")
+        target = getattr(cfg, "daily_profit_target", 0) or 0
+        if target and self.realized_pnl >= target:
+            self.halt(f"daily profit target ₹{target:,.0f} reached")
+        max_losses = getattr(cfg, "max_consecutive_losses", 0) or 0
+        if max_losses and self.consecutive_losses >= max_losses:
+            self.halt(f"{self.consecutive_losses} losses in a row")

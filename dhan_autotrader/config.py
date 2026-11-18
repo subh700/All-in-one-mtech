@@ -72,11 +72,17 @@ class Config:
     max_trades_per_day: int = 6
     max_daily_loss: float = 1000.0
     max_open_positions: int = 2
+    max_risk_per_trade: float = 0.0       # ₹; 0 = off
+    daily_profit_target: float = 0.0      # ₹; stop for the day once reached; 0 = off
+    max_consecutive_losses: int = 0       # halt after N losing trades in a row; 0 = off
+    cooldown_after_loss_min: int = 0      # no new entries for N minutes after a loss; 0 = off
+    slippage_pct: float = 0.05            # backtest: % of price lost per fill
     trail_trigger_pct: float = 0.0   # 0 = trailing off (equity)
     trail_pct: float = 0.0
 
     telegram_token: str = ""
     telegram_chat_id: str = ""
+    telegram_commands: bool = True        # accept /status, /stop ... from your chat
 
     entry_start: time = time(9, 30)
     entry_end: time = time(14, 45)
@@ -114,10 +120,16 @@ class Config:
             max_trades_per_day=int(e("MAX_TRADES_PER_DAY", "6")),
             max_daily_loss=float(e("MAX_DAILY_LOSS", "1000")),
             max_open_positions=int(e("MAX_OPEN_POSITIONS", "2")),
+            max_risk_per_trade=float(e("MAX_RISK_PER_TRADE", "0")),
+            daily_profit_target=float(e("DAILY_PROFIT_TARGET", "0")),
+            max_consecutive_losses=int(e("MAX_CONSECUTIVE_LOSSES", "0")),
+            cooldown_after_loss_min=int(e("COOLDOWN_AFTER_LOSS_MIN", "0")),
+            slippage_pct=float(e("SLIPPAGE_PCT", "0.05")),
             trail_trigger_pct=float(e("TRAIL_TRIGGER_PCT", "0")),
             trail_pct=float(e("TRAIL_PCT", "0")),
             telegram_token=e("TELEGRAM_BOT_TOKEN", "").strip(),
             telegram_chat_id=e("TELEGRAM_CHAT_ID", "").strip(),
+            telegram_commands=_bool(e("TELEGRAM_COMMANDS", "true")),
             entry_start=_parse_time(e("ENTRY_START", "09:30")),
             entry_end=_parse_time(e("ENTRY_END", "14:45")),
             square_off=_parse_time(e("SQUARE_OFF", "15:15")),
@@ -140,6 +152,9 @@ class Config:
             raise ValueError("RSI_SELL must be below RSI_BUY")
         if self.trail_trigger_pct < 0 or not (0 <= self.trail_pct < 100):
             raise ValueError("TRAIL_TRIGGER_PCT must be >= 0 and TRAIL_PCT in [0, 100)")
+        if min(self.max_risk_per_trade, self.daily_profit_target, self.max_consecutive_losses,
+               self.cooldown_after_loss_min, self.slippage_pct) < 0:
+            raise ValueError("Risk guard settings must be >= 0")
         if self.fast_ema >= self.slow_ema:
             raise ValueError("FAST_EMA must be smaller than SLOW_EMA")
         if not (self.entry_start < self.entry_end < self.square_off):

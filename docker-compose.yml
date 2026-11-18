@@ -1,0 +1,12 @@
+# docker compose up -d --build        (logs: docker compose logs -f)
+services:
+  bot:
+    build: .
+    env_file: .env
+    restart: unless-stopped        # crash or reboot -> restarts; open positions are restored
+    stop_signal: SIGINT            # square off open positions before stopping
+    stop_grace_period: 60s
+    volumes:
+      - ./logs:/app/logs
+      - ./state:/app/state
+    command: ["--daemon"]          # live: ["--daemon", "--confirm-live"] with TRADING_MODE=live

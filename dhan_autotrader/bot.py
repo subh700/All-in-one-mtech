@@ -7,6 +7,7 @@ from datetime import datetime
 
 from .broker import IST, BrokerError, DhanBroker
 from .config import Config, Instrument
+from .costs import trade_charges
 from .journal import (NullJournal, NullStore, StateStore, TradeJournal, position_from_dict, position_to_dict,
                       risk_from_dict, risk_to_dict)
 from .notify import Notifier
@@ -34,8 +35,53 @@ def verify_restored(broker, security_id: str, pos: Position) -> bool:
     return True
 
 
-def run_session(bot, title: str) -> None:
-    """Poll `bot.tick()` until square-off time; square off on Ctrl+C; send a daily summary."""
+HELP = ("Commands:\n/status — positions, P&L, state\n/pnl — today's P&L\n/pause — no new entries\n"
+        "/resume — allow entries again\n/squareoff — close all positions now (keeps trading)\n"
+        "/stop — close all and stop trading for today\n/help")
+
+
+def handle_command(bot, cmd: str) -> str:
+    """Execute a remote command against a TradingBot or OptionsRunner and return the reply."""
+    risk = bot.risk
+    if cmd in ("/status", "/start"):
+        state = ("HALTED: " + risk.halt_reason) if risk.halted else ("PAUSED" if risk.paused else "running")
+        lines = [f"{bot.cfg.mode.upper()} | {state}",
+                 f"Trades today: {risk.trades_today}/{bot.cfg.max_trades_per_day} | realized ₹{risk.realized_pnl:,.2f}"]
+        lines += bot.status_lines() or ["No open positions"]
+        return "\n".join(lines)
+    if cmd == "/pnl":
+        try:
+            unreal = bot.unrealized_total()
+        except BrokerError:
+            unreal = 0.0
+        return (f"Realized ₹{risk.realized_pnl:,.2f} | open ₹{unreal:,.2f} | "
+                f"total ₹{risk.realized_pnl + unreal:,.2f}")
+    if cmd == "/pause":
+        risk.paused = True
+        bot.save_state()
+        return "⏸ Paused — no new entries. Open positions are still managed (SL/target/trailing)."
+    if cmd == "/resume":
+        risk.paused = False
+        bot.save_state()
+        return "▶️ Resumed" + (f" (but halted for today: {risk.halt_reason})" if risk.halted else "")
+    if cmd == "/squareoff":
+        bot.square_off_all("Telegram /squareoff")
+        return "Squared off all positions. Still trading — send /pause or /stop to stop new entries."
+    if cmd == "/stop":
+        risk.halt("stopped via Telegram")
+        bot.square_off_all("Telegram /stop")
+        bot.save_state()
+        return "🛑 Stopped for today — all positions closed."
+    return HELP
+
+
+def run_session(bot, title: str, commands=None) -> bool:
+    """Poll `bot.tick()` until square-off time; square off on Ctrl+C; send a daily summary.
+
+    `commands` (TelegramCommands) are handled between ticks.
+    Returns True if the session was interrupted with Ctrl+C.
+    """
+    interrupted = False
     cfg, clock, notifier = bot.cfg, bot.clock, bot.notifier
     log.info("Starting %s", title)
     restored = bot.restore()
@@ -45,22 +91,37 @@ def run_session(bot, title: str) -> None:
             now = clock()
             if now.weekday() >= 5:
                 log.info("Weekend — market closed. Exiting.")
-                return
+                break
             bot.tick()
             if bot.risk.must_square_off(now.time()):
                 log.info("Square-off time reached. Done for the day.")
                 break
-            _time.sleep(cfg.poll_seconds)
+            if commands is None:
+                _time.sleep(cfg.poll_seconds)
+                continue
+            deadline = _time.monotonic() + cfg.poll_seconds
+            while (left := deadline - _time.monotonic()) > 0:
+                cmd = commands.get(timeout=left)
+                if cmd:
+                    log.info("Telegram command %s", cmd)
+                    try:
+                        notifier.send(handle_command(bot, cmd))
+                    except BrokerError as exc:
+                        notifier.send(f"⚠️ {cmd} failed: {exc}")
     except KeyboardInterrupt:
+        interrupted = True
         log.warning("Interrupted — squaring off open positions")
         bot.square_off_all("manual stop")
     finally:
         summary = (f"📊 Day summary: {bot.risk.trades_today} trades, "
                    f"realized P&L ₹{bot.risk.realized_pnl:,.2f}"
-                   + (" (halted: daily loss limit)" if bot.risk.halted else ""))
+                   + (f" (halted: {bot.risk.halt_reason})" if bot.risk.halted else ""))
         log.info(summary)
         notifier.send(summary)
         notifier.close()
+        if commands is not None:
+            commands.close()
+    return interrupted
 
 
 class TradingBot:
@@ -74,6 +135,7 @@ class TradingBot:
         self.positions: dict[str, Position] = {}
         self.clock = clock or (lambda: datetime.now(IST))
         self.notifier = notifier or Notifier()
+        self.risk.on_halt = lambda reason: self.notifier.send(f"🛑 Halted for today: {reason}")
         self._last_bar: dict[str, datetime] = {}
 
     # ---- persistence ---------------------------------------------------
@@ -122,7 +184,7 @@ class TradingBot:
                 self._error(f"{inst.symbol} exit check failed: {exc}", key=f"exit:{inst.symbol}")
 
         if self.risk.halted and self.positions:
-            self.square_off_all("daily loss limit")
+            self.square_off_all(self.risk.halt_reason)
             return
 
         if not self.risk.in_entry_window(now.time()):
@@ -192,14 +254,15 @@ class TradingBot:
         return total
 
     def _open(self, inst: Instrument, side: str, ref_price: float) -> None:
-        ok, why = self.risk.can_open(len(self.positions), self._unrealized())
+        ok, why = self.risk.can_open(len(self.positions), self._unrealized(), now=self.clock())
         if not ok:
             log.info("Skip %s %s: %s", side, inst.symbol, why)
             return
         price = self.broker.ltp(inst) or ref_price  # size on live price, not the stale close
-        qty = self.risk.quantity(price)
+        qty = self.risk.cap_for_risk(self.risk.quantity(price), price * self.cfg.stop_loss_pct / 100)
         if qty < 1:
-            log.info("Skip %s %s: CAPITAL_PER_TRADE too small for price %.2f", side, inst.symbol, price)
+            log.info("Skip %s %s: CAPITAL_PER_TRADE / MAX_RISK_PER_TRADE too small for price %.2f",
+                     side, inst.symbol, price)
             return
         fill = self.broker.market_order(inst, side, qty, tag=f"bot-{inst.symbol}-open")
         stop, target = self.risk.brackets(side, fill.price)
@@ -218,15 +281,14 @@ class TradingBot:
         fill = self.broker.market_order(inst, exit_side, pos.qty, tag=f"bot-{inst.symbol}-close")
         pnl = pos.pnl(fill.price)
         del self.positions[inst.symbol]
-        self.risk.record_exit(pnl)
-        self.journal.record(pos, fill.price, pnl, reason, self.clock())
+        self.risk.record_exit(pnl, now=self.clock())
+        charges = trade_charges(inst.exchange_segment, pos.side, pos.entry, fill.price, pos.qty)
+        self.journal.record(pos, fill.price, pnl, reason, self.clock(), charges=charges)
         self.save_state()
         msg = (f"{inst.symbol} x{pos.qty} @ {fill.price:.2f} ({reason}) "
-               f"P&L ₹{pnl:,.2f} | day ₹{self.risk.realized_pnl:,.2f}")
+               f"P&L ₹{pnl:,.2f} (net ≈ ₹{pnl - charges:,.2f}) | day ₹{self.risk.realized_pnl:,.2f}")
         log.info("CLOSE %s", msg)
         self.notifier.send(f"{'✅' if pnl >= 0 else '🔴'} CLOSE {msg}")
-        if self.risk.halted:
-            self.notifier.send("🛑 Daily loss limit hit — no more entries today", key="halted")
 
     def square_off_all(self, reason: str) -> None:
         for inst in self.cfg.instruments:
@@ -240,6 +302,24 @@ class TradingBot:
                     self.save_state()
                     return
 
-    def run(self) -> None:
-        run_session(self, f"equity bot ({self.cfg.mode.upper()}) signal={self.strategy.name} on "
-                          + ", ".join(i.symbol for i in self.cfg.instruments))
+    def status_lines(self) -> list[str]:
+        out = []
+        for inst in self.cfg.instruments:
+            pos = self.positions.get(inst.symbol)
+            if not pos:
+                continue
+            try:
+                ltp = self.broker.ltp(inst)
+                pnl = f"LTP {ltp:.2f} | P&L ₹{pos.pnl(ltp):,.2f}"
+            except BrokerError:
+                pnl = "LTP n/a"
+            out.append(f"{pos.side} {pos.symbol} x{pos.qty} @ {pos.entry:.2f} | {pnl} | SL {pos.stop:.2f}"
+                       + (" (trailing)" if pos.trailing else ""))
+        return out
+
+    def unrealized_total(self) -> float:
+        return self._unrealized()
+
+    def run(self, commands=None) -> bool:
+        return run_session(self, f"equity bot ({self.cfg.mode.upper()}) signal={self.strategy.name} on "
+                          + ", ".join(i.symbol for i in self.cfg.instruments), commands=commands)
